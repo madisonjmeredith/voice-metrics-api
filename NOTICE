@@ -1,0 +1,25 @@
+voice-metrics-api
+Copyright (C) 2026 Madison Meredith
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See LICENSE for the full text.
+
+Derived work
+------------
+
+The scoring approach, the per-phoneme population statistics in
+app/reference/stats.json, and the formant weights in app/reference/weights.json
+are the work of Luna McNulty, licensed under the GNU Affero General Public
+License version 3. Both JSON files are copied verbatim. The Python in this
+repository is a reimplementation of the original resonance.py and
+textgrid-formants.praat.
+
+Third-party components
+----------------------
+
+- Montreal Forced Aligner and its english_us_arpa acoustic model and
+  dictionary (MIT), https://github.com/MontrealCorpusTools
+- Praat via praat-parselmouth (GPL-3.0), https://parselmouth.readthedocs.io
+- ffmpeg (LGPL/GPL), https://ffmpeg.org
