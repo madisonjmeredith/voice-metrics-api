@@ -1,4 +1,4 @@
-# voice-metrics-api
+# Voice Metrics API
 
 Pitch and resonance scoring for voice training. Upload a recording and the
 text that was read; get back pitch statistics, a 0–1 resonance score, and,
