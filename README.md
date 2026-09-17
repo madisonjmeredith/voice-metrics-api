@@ -80,10 +80,13 @@ while its model loads after startup or a restart.
 ## Running it
 
 ```sh
-docker build --platform linux/amd64 -t voice-metrics-api .
-docker run --rm -p 8080:8080 voice-metrics-api
+docker build --platform linux/amd64 --target base -t voice-metrics-api .
+docker run --rm --platform linux/amd64 -p 8080:8080 voice-metrics-api
 curl -F audio=@clip.webm -F transcript="Hello there, world." "localhost:8080/analyze?include_phones=1"
 ```
+
+`--target base` matters: `test` is the Dockerfile's last stage, so a build
+without it produces the test image, with pytest and the suite inside.
 
 The image is amd64 only: `praat-parselmouth` has no arm64 wheels and MFA's
 Kaldi build is linux-64. On Apple Silicon the build and the container run
