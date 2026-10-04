@@ -33,6 +33,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
   "word_count": 9,
   "oovs": [],
   "suspicious": false,
+  "speech_coverage": 0.78,
   "pitch":     { "mean": 181.2, "median": 178.9, "stdev": 24.1, "min": 121.0, "max": 240.3, "unit": "Hz" },
   "resonance": { "mean": 0.58, "median": 0.57, "stdev": 0.11 },
   "formants":  { "f1": { "mean": 512.0, "...": "..." }, "f2": { "...": "..." }, "f3": { "...": "..." }, "unit": "Hz" },
@@ -47,8 +48,8 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
   `scored_phone_count` is how many had reference statistics.
 - `oovs` lists transcript words missing from the pronunciation dictionary.
   They are aligned as unknown and never scored.
-- `suspicious` is set when a phone or word came out implausibly long, which
-  usually means the audio runs well past the transcript.
+- `suspicious` is set when an aligned phone runs longer than 0.8 s or a word longer than 2 s. Slow, deliberate reading can trip it and mismatched audio usually won't. The aligner puts audio the transcript doesn't cover into silence instead of stretching a speech label, so `speech_coverage` is the field for that.
+- `speech_coverage` is the share of the clip that sits under aligned speech phones, from 0 to 1. Silence and out-of-vocabulary words don't count toward it, so a transcript with entries in `oovs` reads lower. Check it for audio that didn't match the transcript. `word_count` can't tell you that because the aligner places every in-vocabulary word no matter what the audio holds. In the seven takes measured so far, a real read came back at 0.78 to 0.82 (slow reads included) and tones or looped clips at 0.02 to 0.22. The service reports the number and leaves the floor to you. It can't catch a clip that is dense with speech but has the wrong words (0.73 in the one case measured) because forced alignment has no way to tell which words were said.
 - `z` is the phone's F0–F3 as standard deviations from the population mean
   for that phoneme.
 

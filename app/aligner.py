@@ -78,6 +78,9 @@ class Alignment:
             w.duration > SUSPICIOUS_WORD_SECONDS for w in self.speech_words
         )
 
+    def speech_coverage(self, duration: float) -> float:
+        return sum(p.duration for p in self.speech_phones) / duration
+
 
 class AlignmentError(Exception):
     """MFA could not align the transcript to the audio, even with a wide beam."""

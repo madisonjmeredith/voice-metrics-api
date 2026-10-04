@@ -64,6 +64,7 @@ def test_analyze_returns_prosody_compatible_aggregates(client, vowel_a):
     assert body["word_count"] == 1
     assert body["oovs"] == []
     assert body["suspicious"] is False
+    assert body["speech_coverage"] == pytest.approx(0.867, abs=0.001)
     assert set(body["pitch"]) == {"mean", "median", "stdev", "min", "max", "unit"}
     assert body["pitch"]["mean"] == pytest.approx(140.0, abs=3.0)
     assert set(body["resonance"]) == {"mean", "median", "stdev"}

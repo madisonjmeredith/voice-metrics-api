@@ -5,11 +5,12 @@ image, and therefore CI); skipped on a laptop without the conda environment.
 
 import time
 
+import numpy as np
 import pytest
 
 from app.converter import get_audio_duration
 from app.worker import ACOUSTIC_DIR, DICTIONARY_PATH
-from tests.conftest import FIXTURES, needs_mfa, post_analyze
+from tests.conftest import FIXTURES, FS, needs_mfa, post_analyze, write_wav
 from tests.textgrids import parse_textgrid
 
 HELLO_WAV = FIXTURES / "hello.wav"
@@ -28,15 +29,29 @@ def aligner():
 
 @needs_mfa
 def test_aligns_hello(aligner):
+    duration = get_audio_duration(HELLO_WAV)
     started = time.perf_counter()
-    alignment = aligner.align(HELLO_WAV, get_audio_duration(HELLO_WAV), HELLO_TEXT)
+    alignment = aligner.align(HELLO_WAV, duration, HELLO_TEXT)
     elapsed = time.perf_counter() - started
 
     assert [w.label for w in alignment.speech_words] == ["hello", "there", "world"]
     assert all(p.label[-1].isdigit() for p in alignment.speech_phones if p.label[0] in "AEIOU")
     assert alignment.oovs == []
     assert not alignment.suspicious
+    assert alignment.speech_coverage(duration) > 0.7
     assert elapsed < ALIGN_BUDGET_SECONDS
+
+
+@needs_mfa
+def test_coverage_is_low_when_the_audio_is_not_the_transcript(aligner, tmp_path):
+    seconds = 4.0
+    tone = 0.5 * np.sin(2 * np.pi * 440.0 * np.arange(int(FS * seconds)) / FS)
+    wav = write_wav(tmp_path / "tone.wav", tone)
+
+    alignment = aligner.align(wav, seconds, "Can you hear me okay?")
+
+    assert [w.label for w in alignment.speech_words] == ["can", "you", "hear", "me", "okay"]
+    assert alignment.speech_coverage(seconds) < 0.3
 
 
 @needs_mfa

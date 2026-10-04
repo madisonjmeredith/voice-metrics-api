@@ -74,6 +74,17 @@ naming or linking the project; leave it that way.
 shared lexicon per request and its thread-safety is unverified. `oovs` in
 the response tells the client which words went unscored.
 
+**A mismatched take is reported as `speech_coverage`, not judged.** When the
+audio does not match the transcript, MFA puts the slack into `sil`/`sp`
+instead of stretching a speech label, so `suspicious` rarely fires, and
+`word_count` is only the transcript's word count minus `len(oovs)`. The share
+of the clip under speech phones does separate them: 0.78–0.82 for real reads,
+slow ones included, against 0.02–0.22 for tones and looped clips in issue #3's
+measurements. The service returns the number and the caller owns the floor,
+so it can be re-tuned without a redeploy. `spn` spans are excluded, so OOV
+words lower it. Speech-dense audio with the wrong words still reads high
+(0.73); catching that needs recognition, not alignment.
+
 **Model files are curled from the GitHub release**, not fetched with
 `mfa model download`, because that goes through the unauthenticated GitHub
 API and rate-limits CI builds. The acoustic zip is pre-extracted so nothing

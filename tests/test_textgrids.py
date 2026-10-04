@@ -1,3 +1,5 @@
+import pytest
+
 from app.aligner import NON_SPEECH_LABELS
 from tests.textgrids import parse_textgrid
 from tests.conftest import FIXTURES
@@ -45,3 +47,8 @@ def test_intervals_are_contiguous_and_ordered():
 
 def test_not_suspicious_for_a_normal_reading():
     assert not parse_textgrid(FIXTURES / "squirrel.TextGrid").suspicious
+
+
+def test_speech_coverage_for_a_normal_reading():
+    alignment = parse_textgrid(FIXTURES / "hello.TextGrid")
+    assert alignment.speech_coverage(alignment.phones[-1].end) == pytest.approx(0.779, abs=0.001)

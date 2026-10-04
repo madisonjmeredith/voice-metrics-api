@@ -170,6 +170,7 @@ async def analyze(
         "word_count": len(alignment.speech_words),
         "oovs": alignment.oovs,
         "suspicious": alignment.suspicious,
+        "speech_coverage": round(alignment.speech_coverage(duration), 3),
         "pitch": {**_round_stats(aggregates["pitch"]), "unit": "Hz"},
         "resonance": _round_stats(aggregates["resonance"], 4),
         "formants": {
