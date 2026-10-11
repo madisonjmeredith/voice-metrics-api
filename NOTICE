@@ -23,3 +23,6 @@ Third-party components
   dictionary (MIT), https://github.com/MontrealCorpusTools
 - Praat via praat-parselmouth (GPL-3.0), https://parselmouth.readthedocs.io
 - ffmpeg (LGPL/GPL), https://ffmpeg.org
+- CMU Pronouncing Dictionary (BSD-2-Clause), https://github.com/cmusphinx/cmudict
+  dictionary/cmudict.dict is a subset of its entries, reformatted. Its
+  copyright notice and license are in dictionary/LICENSE.cmudict.
