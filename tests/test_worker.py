@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import app.worker as worker
-from app.worker import AlignerPool, AlignerUnavailable, AlignmentTimeout
+from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
 
 WAV = Path("unused.wav")
 SPAWN_TIMEOUT = 60.0
@@ -28,6 +28,12 @@ def _fake_align(wav_path: Path, duration: float, transcript: str) -> str:
     return transcript
 
 
+def _fake_tokenize(texts: list[str]) -> list[str]:
+    if texts == ["hang"]:
+        time.sleep(60)
+    return texts
+
+
 class CountingPool(AlignerPool):
     restarts = 0
 
@@ -40,6 +46,7 @@ class CountingPool(AlignerPool):
 def pool(monkeypatch):
     monkeypatch.setattr(worker, "_init", _no_init)
     monkeypatch.setattr(worker, "_align", _fake_align)
+    monkeypatch.setattr(worker, "_tokenize", _fake_tokenize)
     pool = CountingPool(timeout=SPAWN_TIMEOUT)
     pool.start()
     pool._warmup.result(timeout=SPAWN_TIMEOUT)
@@ -70,7 +77,8 @@ def test_calls_queued_behind_a_timeout_fail_without_a_second_restart(pool):
         await asyncio.sleep(0.1)
         # The hung call has already taken its timeout; these must outlast it.
         pool.timeout = SPAWN_TIMEOUT
-        queued = [asyncio.create_task(pool.align(WAV, 0.0, "ready")) for _ in range(5)]
+        queued = [asyncio.create_task(pool.align(WAV, 0.0, "ready")) for _ in range(3)]
+        queued += [asyncio.create_task(pool.tokenize(["ready"])) for _ in range(2)]
         results = await asyncio.gather(hung, *queued, return_exceptions=True)
         return results, await pool.align(WAV, 0.0, "ready")
 
@@ -79,3 +87,10 @@ def test_calls_queued_behind_a_timeout_fail_without_a_second_restart(pool):
     assert [type(r) for r in results] == [AlignmentTimeout] + [AlignerUnavailable] * 5
     assert pool.restarts == 1
     assert after == "ready"
+
+
+def test_a_lexicon_check_that_times_out_restarts_nothing(pool):
+    pool.timeout = 0.1
+    with pytest.raises(AlignerBusy):
+        asyncio.run(pool.tokenize(["hang"]))
+    assert pool.restarts == 0

@@ -12,17 +12,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app.aligner import Alignment, AlignmentError
-from app.worker import AlignerUnavailable, AlignmentTimeout
+from app.aligner import Alignment, AlignmentError, Tokenized
+from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
 from tests.conftest import needs_ffmpeg, post_analyze, vowel_alignment
 
 
 class FakeAligner:
     ready = True
 
-    def __init__(self, result=None, error=None):
+    def __init__(self, result=None, error=None, lexicon=None):
         self.result = result
         self.error = error
+        self.lexicon = lexicon or {}
         self.calls = []
 
     def start(self):
@@ -39,6 +40,11 @@ class FakeAligner:
         if self.error is not None:
             raise self.error
         return self.result
+
+    async def tokenize(self, texts: list[str]) -> list[Tokenized]:
+        if self.error is not None:
+            raise self.error
+        return [Tokenized(*self.lexicon.get(text, (text.lower(), []))) for text in texts]
 
 
 @pytest.fixture
@@ -156,3 +162,65 @@ def test_bearer_token_when_configured(client, vowel_a, monkeypatch):
 def test_health(client):
     with client(FakeAligner(vowel_alignment())) as c:
         assert c.get("/health").json() == {"status": "healthy", "aligner": "ready"}
+
+
+def test_lexicon_reports_each_word_in_order(client):
+    lexicon = {"Zorblax": ("zorblax", ["zorblax"]), "...": ("", [])}
+    with client(FakeAligner(lexicon=lexicon)) as c:
+        response = c.post("/lexicon", json={"words": ["Hello", *lexicon]})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "words": [
+            {"word": "Hello", "normalized": "hello", "oovs": [], "in_vocabulary": True},
+            {"word": "Zorblax", "normalized": "zorblax", "oovs": ["zorblax"], "in_vocabulary": False},
+            {"word": "...", "normalized": "", "oovs": [], "in_vocabulary": False},
+        ]
+    }
+
+
+def test_lexicon_accepts_a_batch_at_the_caps(client):
+    words = ["a" * main.MAX_WORD_LENGTH] * main.MAX_LEXICON_WORDS
+    with client(FakeAligner()) as c:
+        response = c.post("/lexicon", json={"words": words})
+    assert response.status_code == 200
+    assert len(response.json()["words"]) == main.MAX_LEXICON_WORDS
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"words": []},
+        {"words": "hello"},
+        {"words": [3]},
+        {"words": ["a"] * (main.MAX_LEXICON_WORDS + 1)},
+        {"words": ["a" * (main.MAX_WORD_LENGTH + 1)]},
+    ],
+    ids=["no words", "empty list", "not a list", "not a string", "too many", "too long"],
+)
+def test_lexicon_rejects_a_malformed_batch(client, body):
+    with client(FakeAligner()) as c:
+        response = c.post("/lexicon", json=body)
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "error",
+    [AlignerUnavailable("worker died"), AlignerBusy("The aligner did not answer within 10 s")],
+)
+def test_lexicon_answers_503_when_the_aligner_cannot(client, error):
+    with client(FakeAligner(error=error)) as c:
+        response = c.post("/lexicon", json={"words": ["hello"]})
+    assert response.status_code == 503
+    assert response.json()["detail"] == str(error)
+
+
+def test_lexicon_needs_the_bearer_token_when_configured(client, monkeypatch):
+    monkeypatch.setattr(main, "API_TOKEN", "s3cret")
+    with client(FakeAligner()) as c:
+        denied = c.post("/lexicon", json={"words": ["hello"]})
+        c.headers["Authorization"] = "Bearer s3cret"
+        allowed = c.post("/lexicon", json={"words": ["hello"]})
+    assert denied.status_code == 401
+    assert allowed.status_code == 200

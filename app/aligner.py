@@ -13,7 +13,7 @@ sets here can be used on machines without the conda environment.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # Labels MFA emits for things that are not speech: praatio gaps, MFA's silence
 # word and phone, and the out-of-vocabulary word and phone.
@@ -80,6 +80,15 @@ class Alignment:
 
     def speech_coverage(self, duration: float) -> float:
         return sum(p.duration for p in self.speech_phones) / duration
+
+
+class Tokenized(NamedTuple):
+    normalized: str
+    oovs: list[str]
+
+    @property
+    def in_vocabulary(self) -> bool:
+        return bool(self.normalized.strip()) and not self.oovs
 
 
 class AlignmentError(Exception):
@@ -160,10 +169,10 @@ class LoadedAligner:
             ),
         )
 
-    def tokenize(self, transcript: str) -> tuple[str, list[str]]:
+    def tokenize(self, transcript: str) -> Tokenized:
         """Normalize a transcript the way MFA will; returns (text, oov words)."""
         tokenized = self._tokenizer(transcript)
-        return tokenized.normalized_text, sorted(set(tokenized.oovs))
+        return Tokenized(tokenized.normalized_text, sorted(set(tokenized.oovs)))
 
     def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
         from kalpy.exceptions import AlignerError

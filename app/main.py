@@ -13,18 +13,19 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.aligner import Alignment, AlignmentError, EmptyTranscriptError
 from app.analyzer import AudioAnalyzer
 from app.converter import AudioDecodeError, convert_to_wav, get_audio_duration
 from app.measurement import MeasuredPhone, measure_phones
 from app.scoring import score
-from app.worker import AlignerPool, AlignerUnavailable, AlignmentTimeout
+from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 MIN_DURATION = 1.0
 MAX_DURATION = 60.0
 MIN_SCORED_PHONES = 3
+MAX_LEXICON_WORDS = 1000
+MAX_WORD_LENGTH = 200
 
 API_TOKEN = os.environ.get("API_TOKEN")
 
@@ -66,6 +69,7 @@ ERROR_STATUS = {
     AlignmentError: 422,
     AlignmentTimeout: 504,
     AlignerUnavailable: 503,
+    AlignerBusy: 503,
 }
 
 
@@ -184,12 +188,35 @@ async def analyze(
     return result
 
 
+class LexiconRequest(BaseModel):
+    words: list[Annotated[str, StringConstraints(max_length=MAX_WORD_LENGTH)]] = Field(
+        min_length=1, max_length=MAX_LEXICON_WORDS
+    )
+
+
+@app.post("/lexicon", dependencies=[Depends(require_token)])
+async def lexicon(body: LexiconRequest):
+    tokenized = await app.state.aligner.tokenize(body.words)
+    return {
+        "words": [
+            {
+                "word": word,
+                "normalized": entry.normalized,
+                "oovs": entry.oovs,
+                "in_vocabulary": entry.in_vocabulary,
+            }
+            for word, entry in zip(body.words, tokenized)
+        ]
+    }
+
+
 @app.get("/")
 async def root():
     return {
         "name": "voice-metrics-api",
         "endpoints": {
             "POST /analyze": "Score a recording against its transcript",
+            "POST /lexicon": "Report which words the pronunciation dictionary has",
             "GET /health": "Liveness check",
         },
     }

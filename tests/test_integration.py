@@ -76,17 +76,40 @@ def test_matches_checked_in_textgrid(aligner):
         assert a.start == pytest.approx(b.start, abs=0.02)
 
 
-@needs_mfa
-def test_full_request_through_the_app():
+@pytest.fixture(scope="module")
+def app_client():
     from fastapi.testclient import TestClient
 
     import app.main as main
 
     with TestClient(main.app) as client:
-        assert client.get("/health").json()["aligner"] == "ready"
-        response = post_analyze(client, HELLO_WAV, HELLO_TEXT, include_phones=1)
+        yield client
+
+
+@needs_mfa
+def test_full_request_through_the_app(app_client):
+    assert app_client.get("/health").json()["aligner"] == "ready"
+    response = post_analyze(app_client, HELLO_WAV, HELLO_TEXT, include_phones=1)
     assert response.status_code == 200, response.text
     body = response.json()
     assert [w["word"] for w in body["words"]] == ["hello", "there", "world"]
     assert body["scored_phone_count"] >= 3
     assert 0.0 <= body["resonance"]["median"] <= 1.0
+
+
+@needs_mfa
+def test_lexicon_through_the_app(app_client):
+    words = ["Hello", "Siobhán", "Niamh's", "L'Oréal", "...", "Zorblax's"]
+    response = app_client.post("/lexicon", json={"words": words})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "words": [
+            {"word": "Hello", "normalized": "hello", "oovs": [], "in_vocabulary": True},
+            {"word": "Siobhán", "normalized": "siobhán", "oovs": ["siobhán"], "in_vocabulary": False},
+            {"word": "Niamh's", "normalized": "niamh 's", "oovs": [], "in_vocabulary": True},
+            {"word": "L'Oréal", "normalized": "l' oréal", "oovs": ["oréal"], "in_vocabulary": False},
+            {"word": "...", "normalized": "", "oovs": [], "in_vocabulary": False},
+            {"word": "Zorblax's", "normalized": "zorblax 's", "oovs": ["zorblax"], "in_vocabulary": False},
+        ]
+    }

@@ -20,7 +20,7 @@ from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Optional
 
-from app.aligner import Alignment, LoadedAligner
+from app.aligner import Alignment, LoadedAligner, Tokenized
 from app.converter import get_audio_duration
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/opt/mfa-models"))
@@ -42,6 +42,10 @@ class AlignerUnavailable(Exception):
     """The aligner process died; a fresh one is starting."""
 
 
+class AlignerBusy(Exception):
+    """The aligner did not get to the call in time; nothing was restarted."""
+
+
 def _init(acoustic_dir: Path, dictionary_path: Path) -> None:
     global _ALIGNER
     _ALIGNER = LoadedAligner(acoustic_dir, dictionary_path)
@@ -50,6 +54,11 @@ def _init(acoustic_dir: Path, dictionary_path: Path) -> None:
 def _align(wav_path: Path, duration: float, transcript: str) -> Alignment:
     assert _ALIGNER is not None
     return _ALIGNER.align(wav_path, duration, transcript)
+
+
+def _tokenize(texts: list[str]) -> list[Tokenized]:
+    assert _ALIGNER is not None
+    return [_ALIGNER.tokenize(text) for text in texts]
 
 
 class AlignerPool:
@@ -123,3 +132,11 @@ class AlignerPool:
         except asyncio.TimeoutError:
             self._restart_if_current(pool)
             raise AlignmentTimeout(f"Alignment exceeded {self.timeout:.0f} s")
+
+    async def tokenize(self, texts: list[str]) -> list[Tokenized]:
+        """Normalize each text the way an alignment would."""
+        try:
+            return await self._call(self._pool, _tokenize, texts)
+        except asyncio.TimeoutError:
+            # No restart: that would kill a reload or an alignment this call was only waiting on.
+            raise AlignerBusy(f"The aligner did not answer within {self.timeout:.0f} s")
