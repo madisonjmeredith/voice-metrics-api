@@ -46,7 +46,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
 
 - `sample_count` and `phone_count` are the same number, the phones measured.
   `scored_phone_count` is how many had reference statistics.
-- `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. [Custom dictionary](#custom-dictionary) covers adding them.
+- `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. [Adding a word](#adding-a-word) covers adding them.
 - `suspicious` is set when an aligned phone runs longer than 0.8 s or a word longer than 2 s. Slow, deliberate reading can trip it and mismatched audio usually won't. The aligner puts audio the transcript doesn't cover into silence instead of stretching a speech label, so `speech_coverage` is the field for that.
 - `speech_coverage` is the share of the clip that sits under aligned speech phones, from 0 to 1. Silence and out-of-vocabulary words don't count toward it, so a transcript with entries in `oovs` reads lower. Check it for audio that didn't match the transcript. `word_count` can't tell you that because the aligner places every in-vocabulary word no matter what the audio holds. In the seven takes measured so far, a real read came back at 0.78 to 0.82 (slow reads included) and tones or looped clips at 0.02 to 0.22. The service reports the number and leaves the floor to you. It can't catch a clip that is dense with speech but has the wrong words (0.73 in the one case measured) because forced alignment has no way to tell which words were said.
 - `z` is the phone's F0–F3 as standard deviations from the population mean
@@ -77,24 +77,42 @@ while its model loads after startup or a restart.
    mapped to 0–1 with 0.5 at the population mean. Pitch and resonance are
    then summarized across phones.
 
-## Custom dictionary
+## Dictionary
 
-`dictionary/custom.dict` holds words the `english_us_arpa` dictionary lacks. The release dictionary is missing some ordinary ones, `update` and `playlist` among them. `oovs` in a response names the ones a transcript needed. The image build appends the file to the release dictionary so a new entry takes effect on the next build.
+The aligner loads one pronunciation dictionary. The image build makes it by appending three files in this order:
+
+1. The `english_us_arpa` release dictionary, downloaded during the build.
+2. `dictionary/cmudict.dict`, the 54,684 words that [CMUdict](https://github.com/cmusphinx/cmudict) has and the release dictionary lacks. `update`, `playlist`, `checkout`, and `liam` are among them.
+3. `dictionary/custom.dict`, for words neither of those has.
+
+`oovs` in a response names the words a transcript needed that none of the three had.
+
+`cmudict.dict` is generated, so don't edit it by hand. This rebuilds it from CMUdict at the commit pinned in the script:
+
+```sh
+python spike/cmudict_gap.py
+```
+
+It keeps the entries whose word is all letters and isn't in the release dictionary. It also rewrites `dictionary/LICENSE.cmudict`, CMUdict's license, which has to stay beside the entries.
+
+### Adding a word
+
+Add it to `dictionary/custom.dict`. It takes effect on the next image build.
 
 An entry is one line: the word in lowercase, a tab, and its ARPAbet phones separated by single spaces. Every vowel carries a stress digit (0, 1, or 2).
 
 ```text
-update	AH0 P D EY1 T
-update	AH1 P D EY2 T
+journaling	JH ER1 N AH0 L IH0 NG
+journaling	JH ER1 N L IH0 NG
 ```
 
 - Keep the lines sorted and unique.
 - The format has no comments. A line that starts with `#` is read as a word.
 - A word can have more than one line, one per pronunciation. The aligner uses whichever fits the audio.
-- Add only words the release dictionary lacks. The suite in the image rejects a word it already has.
+- Add only words the other two files lack. The checks that run without Docker reject a word `cmudict.dict` has. The suite in the image rejects a word the release dictionary has.
 - Resonance is scored only for phones that have reference statistics. `AE2` and every `AW` have none. Those phones still count toward `speech_coverage` and the pitch figures.
 
-Run `.venv/bin/pytest` after editing the file. `tests/test_dictionary.py` checks every entry and its format checks run without Docker. They matter because a phone the acoustic model doesn't have loads without an error and then crashes the aligner the first time a transcript uses that word.
+Run `.venv/bin/pytest` after editing the file. `tests/test_dictionary.py` checks every entry in both files and its format checks run without Docker. They matter because a phone the acoustic model doesn't have loads without an error and then crashes the aligner the first time a transcript uses that word.
 
 ## Running it
 

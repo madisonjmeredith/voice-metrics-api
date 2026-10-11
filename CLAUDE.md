@@ -25,17 +25,20 @@ synthesizer). Nothing from this repo goes back the other way. Ever.
 | `app/scoring.py` | Port of the reference `resonance.py`: outliers, z-scores, weights |
 | `app/reference/` | `stats.json` and `weights.json`, copied verbatim from upstream |
 | `app/warmup.wav` | 1.3 s clip aligned at startup so the model loads before traffic |
-| `dictionary/custom.dict` | Words `english_us_arpa` lacks; appended to the release dictionary at build |
+| `dictionary/cmudict.dict` | CMUdict entries `english_us_arpa` lacks, alphabetic headwords only; generated, appended to the release dictionary at build |
+| `dictionary/LICENSE.cmudict` | CMUdict's BSD 2-clause license, verbatim; stays beside the entries |
+| `dictionary/custom.dict` | Hand-written words neither of those has; appended last |
 | `tests/textgrids.py` | praatio TextGrid parser, used only to turn checked-in alignments into fixtures |
-| `spike/` | Timing script and the parity-number generator; not shipped |
+| `spike/` | Timing script, the parity-number generator, and `cmudict_gap.py`, which regenerates `cmudict.dict`; not shipped |
 
 ## Decisions that were measured or negotiated, not defaulted
 
 **The aligner is loaded once and kept in a worker process.** Measured in the
-image under emulation: model plus lexicon load about 8 s once, then 0.02–0.7 s
-per clip. The CLI `mfa align_one` took 9.4 s cold and 3.1 s with `--no_clean`
-for the same clip because it re-extracts the model and recompiles the lexicon
-every call. The client polls for 45 s with a queue worker in front, so
+image under emulation: model plus lexicon load about 10 s once (about 8 s
+before `cmudict.dict` was merged in; peak RSS went from 1,255 MB to about
+1,450 MB), then 0.02–0.7 s per clip. The CLI `mfa align_one` took 9.4 s cold
+and 3.1 s with `--no_clean` for the same clip because it re-extracts the
+model and recompiles the lexicon every call. The client polls for 45 s with a queue worker in front, so
 the CLI path was never going to fit. It lives in a separate process because
 Kaldi reports fatal errors with `abort()`.
 
@@ -43,6 +46,11 @@ The pool queues its own warm-up alignment on every start, so the model loads
 while the server boots and again while a 503/504 goes out after a restart;
 `/health` reports `warming` until that finishes. The Praat pass runs
 concurrently with alignment because it needs only the WAV.
+
+A request that arrives during a restart has the reload counted against
+`ALIGN_TIMEOUT` (10 s). Under emulation the reload is now about that long, so
+such a request can time out and trigger another restart. The load has not
+been measured on native amd64.
 
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
@@ -74,15 +82,36 @@ naming or linking the project; leave it that way.
 **Out-of-vocabulary words are reported, not guessed.** G2P would mutate the
 shared lexicon per request and its thread-safety is unverified. `oovs` in
 the response tells the client which words went unscored. A word worth
-supporting gets an entry in `dictionary/custom.dict`.
+supporting gets an entry in `dictionary/custom.dict`. The only
+`english_us_arpa` G2P model in the `mfa-models` releases (v2.0.0a) was
+measured in #9: none of its three guesses for `niamh` or `siobhan` matched a
+CMUdict pronunciation, and 44 words took 67 s under emulation.
+
+**CMUdict's missing words are a committed, generated file.** For the 66,015
+headwords the two share, the release dictionary carries a CMUdict
+pronunciation verbatim 96.9% of the time, and it lacks another 60,037 CMUdict
+headwords outright. `dictionary/cmudict.dict` is the 54,684 of those that are
+purely alphabetic (57,253 lines), taken from CMUdict at the commit pinned in
+`spike/cmudict_gap.py`. It is committed instead of fetched at build so the
+format checks cover every line without Docker and the build gains no network
+dependency. Alphabetic only because the tokenizer already splits clitics and
+compounds: of the 5,353 missing headwords with an apostrophe, hyphen, or
+period, 89 stay OOV once the alphabetic entries are in. Do not edit the file
+by hand. Rerun the script when the pinned commit or the release dictionary
+changes, and only then. CMUdict is BSD 2-clause and its first clause deems the
+file's contents source code, so `dictionary/LICENSE.cmudict` and the `NOTICE`
+entry stay with the entries. CMUdict is ASCII-only, so accented spellings (#10)
+and names it lacks are still OOV.
 
 **Extra words are merged into the dictionary at build time.** The release
 asset is saved as `english_us_arpa.base.dict` and the Dockerfile appends
-`dictionary/custom.dict` to it to produce `english_us_arpa.dict`, the one
-path `worker.py` loads. kalpy's `load_pronunciations` takes a single file and
-is not written to be called twice. The merge sits after the dependency layers
-so a dictionary edit does not reinstall the conda environment; do not move
-that `COPY` up into the model layer.
+`dictionary/cmudict.dict` and then `dictionary/custom.dict` to it to produce
+`english_us_arpa.dict`, the one path `worker.py` loads. kalpy's
+`load_pronunciations` takes a single file and is not written to be called
+twice. The merge sits after the dependency layers so a dictionary edit does
+not reinstall the conda environment; do not move that `COPY` up into the model
+layer. The `COPY` takes the whole directory so `LICENSE.cmudict` reaches the
+image with the entries.
 
 **`tests/test_dictionary.py` is the only thing between a mistyped entry and a
 crash.** kalpy accepts any token as a phone. Measured: an entry with a phone
@@ -92,14 +121,17 @@ its word is aligned, so warm-up never sees it. The format has no comment
 syntax either: `# note` parses as the word `#` with the phone `note`. A line
 with no phones raises in `load_pronunciations` and the aligner never becomes
 ready. The format checks run without MFA so a typo is caught before a build.
-In the image the same file checks that its hardcoded phone inventory equals
-the model's, that every custom word tokenizes, and that the loaded
-dictionary's lines for the custom words are exactly `custom.dict`'s. That
-last one fails on a lost or stale merge and on a word the base dictionary
-already has, which kalpy would not report: a repeated headword becomes a
-second pronunciation. Several lines for one word inside `custom.dict` are
-deliberate variants. Relax that check if variants of base words are ever
-wanted. Phones without an entry in
+They cover `cmudict.dict` and `custom.dict` alike, and one of them fails when
+the two files share a headword. In the image the same file checks that its
+hardcoded phone inventory equals the model's, that every word in either file
+tokenizes, and that the loaded dictionary's lines for each file's words are
+exactly that file's. That last one fails on a lost or stale merge and on a
+word the base dictionary already has, which kalpy would not report: a
+repeated headword becomes a second pronunciation. Several lines for one word
+inside a file are deliberate variants. Relax that check if variants of base
+words are ever wanted. `custom.dict` has been empty since #9 because CMUdict
+has all four of the words it held, so its checks pass on nothing until an
+entry is added. Phones without an entry in
 `stats.json` (any `AW` or `UH`, `JH`, `Y`, `ZH`, most vowels outside primary
 stress) still count toward `speech_coverage` and pitch; they get no resonance
 score.
