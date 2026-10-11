@@ -17,9 +17,9 @@ synthesizer). Nothing from this repo goes back the other way. Ever.
 
 | File | Role |
 | --- | --- |
-| `app/main.py` | FastAPI app, validation, error-to-status table, response assembly |
-| `app/worker.py` | One aligner process: model paths, warm-up, hard timeout, restart on crash |
-| `app/aligner.py` | In-process MFA alignment via kalpy; span dataclasses |
+| `app/main.py` | FastAPI app (`/analyze`, `/lexicon`), validation, error-to-status table, response assembly |
+| `app/worker.py` | One aligner process: model paths, warm-up, hard timeout, restart on crash; runs alignments and lexicon checks |
+| `app/aligner.py` | In-process MFA alignment via kalpy; span dataclasses and the tokenizer's result |
 | `app/analyzer.py` | Praat pitch and formant tracks (from formantry) |
 | `app/measurement.py` | One F0/F1–F3 reading per phone at its midpoint |
 | `app/scoring.py` | Port of the reference `resonance.py`: outliers, z-scores, weights |
@@ -29,6 +29,7 @@ synthesizer). Nothing from this repo goes back the other way. Ever.
 | `dictionary/LICENSE.cmudict` | CMUdict's BSD 2-clause license, verbatim; stays beside the entries |
 | `dictionary/custom.dict` | Hand-written words neither of those has; appended last |
 | `tests/textgrids.py` | praatio TextGrid parser, used only to turn checked-in alignments into fixtures |
+| `tests/test_worker.py` | The pool's restart rules over a worker with no aligner in it; runs without MFA |
 | `spike/` | Timing script, the parity-number generator, and `cmudict_gap.py`, which regenerates `cmudict.dict`; not shipped |
 
 ## Decisions that were measured or negotiated, not defaulted
@@ -51,6 +52,43 @@ A request that arrives during a restart has the reload counted against
 `ALIGN_TIMEOUT` (10 s). Under emulation the reload is now about that long, so
 such a request can time out and trigger another restart. The load has not
 been measured on native amd64.
+
+**The lexicon check runs in the aligner process, and it never restarts it.**
+`POST /lexicon` calls `LoadedAligner.tokenize` through the pool, so its answer
+is what an alignment would do by construction, and a change to `tokenize`
+(#10's accent fold, if it lands) shows up there with no further work. The
+alternative was measured in #7: MFA's `SimpleTokenizer` over a word set read
+from the merged dictionary, in the API process. It matched the worker on 61 of
+61 inputs at 3.7 µs per entry, but importing MFA took the API process from 144
+MB to 341 MB RSS, 142 MB of that private, plus 25 MB for the words and 1.3 s at
+startup. The queue wait it would have saved is usually small. Measured on
+the built image under emulation, a three-word check takes 1.8 ms end to end
+and 1,000 entries take 11 to 13 ms. With four clients looping `/analyze` the
+median stayed near 3 ms, the 90th percentile was 254 to 317 ms, and the
+slowest of 200 took 771 ms. The response shape is the same either way, so the
+check can move in-process later without a caller noticing.
+`AlignerPool.tokenize` raises `AlignerBusy` (503) on a timeout and does not
+restart the pool. A hung alignment's own timeout does that, and a lexicon
+check must not kill a reload or an alignment it was only waiting behind. A
+check that arrives as a reload begins waits out `ALIGN_TIMEOUT` and gets that
+503, because under emulation the reload is about as long. `Tokenized` in
+`aligner.py` owns `in_vocabulary`: something left to align, by the test
+`align` uses for `EmptyTranscriptError`, and nothing in `oovs`. `<unk>` and
+`<eps>` read as in vocabulary because they are symbols in MFA's word table;
+`/analyze`'s `oovs` has the same blind spot. The caps (1,000 entries of 200
+characters) bound how long one check holds the worker.
+
+**A call restarts only the pool it was queued on, and `shutdown()` does not
+cancel queued futures.** Every call queued on the one worker fails together
+when it is lost. Each handler used to call `restart()`, so the second killed
+the worker the first had just started; `_restart_if_current` compares the pool
+a call was submitted to with the current one. `cancel_futures=True` raced the
+kill. Measured on Python 3.12 with six calls queued, over 10 trials, 39 of 60
+calls surfaced as `asyncio.CancelledError`, which no handler maps to a status;
+without the flag all 60 got `BrokenProcessPool`. Do not add the flag back.
+`tests/test_worker.py` covers both rules without MFA by patching `_init`,
+`_align`, and `_tokenize` to stand-ins that are importable from the spawned
+worker.
 
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
@@ -160,6 +198,9 @@ it survives every dependency change.
 The client reads `pitch.{mean,median,stdev,min,max}`,
 `resonance.{mean,median,stdev}`, `duration`, and `sample_count`. Keep those
 names and shapes. Anything new is additive.
+
+`/lexicon` returns `words[].{word,normalized,oovs,in_vocabulary}`. Nothing
+reads it yet; treat it the same way once something does.
 
 ## Tests
 

@@ -46,7 +46,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
 
 - `sample_count` and `phone_count` are the same number, the phones measured.
   `scored_phone_count` is how many had reference statistics.
-- `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. [Adding a word](#adding-a-word) covers adding them.
+- `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. [`POST /lexicon`](#post-lexicon) checks a word before anything is recorded and [Adding a word](#adding-a-word) covers adding one.
 - `suspicious` is set when an aligned phone runs longer than 0.8 s or a word longer than 2 s. Slow, deliberate reading can trip it and mismatched audio usually won't. The aligner puts audio the transcript doesn't cover into silence instead of stretching a speech label, so `speech_coverage` is the field for that.
 - `speech_coverage` is the share of the clip that sits under aligned speech phones, from 0 to 1. Silence and out-of-vocabulary words don't count toward it, so a transcript with entries in `oovs` reads lower. Check it for audio that didn't match the transcript. `word_count` can't tell you that because the aligner places every in-vocabulary word no matter what the audio holds. In the seven takes measured so far, a real read came back at 0.78 to 0.82 (slow reads included) and tones or looped clips at 0.02 to 0.22. The service reports the number and leaves the floor to you. It can't catch a clip that is dense with speech but has the wrong words (0.73 in the one case measured) because forced alignment has no way to tell which words were said.
 - `z` is the phone's F0–F3 as standard deviations from the population mean
@@ -56,6 +56,39 @@ Errors: `400` for undecodable audio, audio outside 1–60 s, or a transcript
 with no alignable words; `401` for a bad token; `422` when alignment fails or
 too few phones could be scored; `503` while the aligner restarts; `504` if
 alignment times out.
+
+### `POST /lexicon`
+
+Checks words against the pronunciation dictionary without any audio. Send a JSON body with a `words` list of 1 to 1,000 entries, each up to 200 characters. It takes the same bearer token as `/analyze`.
+
+```json
+{ "words": ["Hello", "Siobhán", "Niamh's", "L'Oréal", "..."] }
+```
+
+You get one result per entry in the order you sent them:
+
+```json
+{
+  "words": [
+    { "word": "Hello",   "normalized": "hello",    "oovs": [],          "in_vocabulary": true },
+    { "word": "Siobhán", "normalized": "siobhán",  "oovs": ["siobhán"], "in_vocabulary": false },
+    { "word": "Niamh's", "normalized": "niamh 's", "oovs": [],          "in_vocabulary": true },
+    { "word": "L'Oréal", "normalized": "l' oréal", "oovs": ["oréal"],   "in_vocabulary": false },
+    { "word": "...",     "normalized": "",         "oovs": [],          "in_vocabulary": false }
+  ]
+}
+```
+
+- `word` is the entry as sent.
+- `normalized` is the text the aligner would align. It's lowercased and its punctuation is dropped. A word with an apostrophe or a hyphen that the dictionary doesn't have whole is usually split into its parts, so one entry can come back as several words.
+- `oovs` lists the parts of `normalized` that the dictionary lacks. They're the strings `/analyze` would report in its own `oovs` and the headwords to add under [Adding a word](#adding-a-word).
+- `in_vocabulary` is true when the entry has something to align and nothing in `oovs`. An entry that normalizes to nothing, like `"..."`, is false.
+
+Each entry goes through the tokenizer `/analyze` uses, by itself. An entry can be one word or a whole sentence. A miss isn't an error. The response says whether the dictionary has the word and leaves what to do about it to you.
+
+The check runs in the aligner's worker process. It waits behind an alignment that's in progress and it can't answer while the aligner restarts.
+
+Errors: `401` for a bad token; `422` for a body that isn't a list of 1 to 1,000 strings of at most 200 characters each; `503` while the aligner restarts or when it doesn't reach the check within `ALIGN_TIMEOUT`.
 
 ### `GET /health`
 
@@ -120,6 +153,7 @@ Run `.venv/bin/pytest` after editing the file. `tests/test_dictionary.py` checks
 docker build --platform linux/amd64 --target base -t voice-metrics-api .
 docker run --rm --platform linux/amd64 -p 8080:8080 voice-metrics-api
 curl -F audio=@clip.webm -F transcript="Hello there, world." "localhost:8080/analyze?include_phones=1"
+curl --json '{"words": ["Hello", "Siobhán"]}' localhost:8080/lexicon
 ```
 
 `--target base` matters: `test` is the Dockerfile's last stage, so a build
