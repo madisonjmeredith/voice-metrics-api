@@ -97,19 +97,29 @@ class AlignerPool:
             # Futures cannot interrupt a busy worker, so kill it outright.
             for process in list(self._pool._processes.values()):
                 process.kill()
-            self._pool.shutdown(wait=False, cancel_futures=True)
+            # No cancel_futures: it races the kill and surfaces queued calls as CancelledError.
+            self._pool.shutdown(wait=False)
             self._pool = None
 
-    async def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
+    def _restart_if_current(self, pool: Optional[ProcessPoolExecutor]) -> None:
+        if self._pool is pool:
+            self.restart()
+
+    async def _call(self, pool: Optional[ProcessPoolExecutor], fn, *args):
+        """Run fn in the worker; a lost worker raises AlignerUnavailable."""
         loop = asyncio.get_running_loop()
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(self._pool, _align, wav_path, duration, transcript),
-                timeout=self.timeout,
+                loop.run_in_executor(pool, fn, *args), timeout=self.timeout
             )
-        except asyncio.TimeoutError:
-            self.restart()
-            raise AlignmentTimeout(f"Alignment exceeded {self.timeout:.0f} s")
         except BrokenProcessPool as e:
-            self.restart()
+            self._restart_if_current(pool)
             raise AlignerUnavailable(str(e))
+
+    async def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
+        pool = self._pool
+        try:
+            return await self._call(pool, _align, wav_path, duration, transcript)
+        except asyncio.TimeoutError:
+            self._restart_if_current(pool)
+            raise AlignmentTimeout(f"Alignment exceeded {self.timeout:.0f} s")
