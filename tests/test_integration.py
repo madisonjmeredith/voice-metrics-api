@@ -56,7 +56,7 @@ def test_reports_out_of_vocabulary_words(aligner):
 
 
 @needs_mfa
-def test_aligns_words_from_the_custom_dictionary(aligner):
+def test_aligns_words_the_release_dictionary_lacks(aligner):
     duration = get_audio_duration(PLAYLIST_WAV)
     alignment = aligner.align(PLAYLIST_WAV, duration, PLAYLIST_TEXT)
 

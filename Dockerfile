@@ -33,8 +33,9 @@ ENV MFA_ROOT_DIR=/tmp/mfa
 
 WORKDIR /app
 
-COPY --chown=$MAMBA_USER:$MAMBA_USER dictionary/custom.dict /app/dictionary/custom.dict
-RUN cat $MODEL_DIR/dictionary/english_us_arpa.base.dict /app/dictionary/custom.dict \
+COPY --chown=$MAMBA_USER:$MAMBA_USER dictionary/ /app/dictionary/
+RUN cat $MODEL_DIR/dictionary/english_us_arpa.base.dict \
+        /app/dictionary/cmudict.dict /app/dictionary/custom.dict \
         > $MODEL_DIR/dictionary/english_us_arpa.dict
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER app/ /app/app/

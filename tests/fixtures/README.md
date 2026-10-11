@@ -4,7 +4,7 @@
   16 kHz mono PCM. Also shipped as `app/warmup.wav`.
 - `hello.TextGrid`: the `mfa align_one` output for it (english_us_arpa v3.0.0).
 - `playlist.wav`: "Update the playlist with a decaf vibe." from the same voice
-  and conversion. Four of its words are in `dictionary/custom.dict` and not in
+  and conversion. Four of its words are in `dictionary/cmudict.dict` and not in
   the release dictionary.
 - `squirrel.TextGrid`: alignment of a 16 s passage from the same voice. Only
   the TextGrid is kept, as a parser fixture with silences (`<eps>`, `sil`)
