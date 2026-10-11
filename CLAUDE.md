@@ -25,6 +25,7 @@ synthesizer). Nothing from this repo goes back the other way. Ever.
 | `app/scoring.py` | Port of the reference `resonance.py`: outliers, z-scores, weights |
 | `app/reference/` | `stats.json` and `weights.json`, copied verbatim from upstream |
 | `app/warmup.wav` | 1.3 s clip aligned at startup so the model loads before traffic |
+| `dictionary/custom.dict` | Words `english_us_arpa` lacks; appended to the release dictionary at build |
 | `tests/textgrids.py` | praatio TextGrid parser, used only to turn checked-in alignments into fixtures |
 | `spike/` | Timing script and the parity-number generator; not shipped |
 
@@ -72,7 +73,36 @@ naming or linking the project; leave it that way.
 
 **Out-of-vocabulary words are reported, not guessed.** G2P would mutate the
 shared lexicon per request and its thread-safety is unverified. `oovs` in
-the response tells the client which words went unscored.
+the response tells the client which words went unscored. A word worth
+supporting gets an entry in `dictionary/custom.dict`.
+
+**Extra words are merged into the dictionary at build time.** The release
+asset is saved as `english_us_arpa.base.dict` and the Dockerfile appends
+`dictionary/custom.dict` to it to produce `english_us_arpa.dict`, the one
+path `worker.py` loads. kalpy's `load_pronunciations` takes a single file and
+is not written to be called twice. The merge sits after the dependency layers
+so a dictionary edit does not reinstall the conda environment; do not move
+that `COPY` up into the model layer.
+
+**`tests/test_dictionary.py` is the only thing between a mistyped entry and a
+crash.** kalpy accepts any token as a phone. Measured: an entry with a phone
+the acoustic model lacks (`ER3`, a vowel with no stress digit, lowercase)
+loads cleanly, aligns every other transcript, and segfaults the worker when
+its word is aligned, so warm-up never sees it. The format has no comment
+syntax either: `# note` parses as the word `#` with the phone `note`. A line
+with no phones raises in `load_pronunciations` and the aligner never becomes
+ready. The format checks run without MFA so a typo is caught before a build.
+In the image the same file checks that its hardcoded phone inventory equals
+the model's, that every custom word tokenizes, and that the loaded
+dictionary's lines for the custom words are exactly `custom.dict`'s. That
+last one fails on a lost or stale merge and on a word the base dictionary
+already has, which kalpy would not report: a repeated headword becomes a
+second pronunciation. Several lines for one word inside `custom.dict` are
+deliberate variants. Relax that check if variants of base words are ever
+wanted. Phones without an entry in
+`stats.json` (any `AW` or `UH`, `JH`, `Y`, `ZH`, most vowels outside primary
+stress) still count toward `speech_coverage` and pitch; they get no resonance
+score.
 
 **A mismatched take is reported as `speech_coverage`, not judged.** When the
 audio does not match the transcript, MFA puts the slack into `sil`/`sp`
@@ -88,7 +118,10 @@ words lower it. Speech-dense audio with the wrong words still reads high
 **Model files are curled from the GitHub release**, not fetched with
 `mfa model download`, because that goes through the unauthenticated GitHub
 API and rate-limits CI builds. The acoustic zip is pre-extracted so nothing
-unpacks per request.
+unpacks per request. The dictionary asset lands as
+`english_us_arpa.base.dict`; the file the aligner loads is built from it.
+That layer is first in the Dockerfile because it depends on nothing else, so
+it survives every dependency change.
 
 ## Response compatibility
 

@@ -5,11 +5,7 @@ FROM --platform=linux/amd64 mambaorg/micromamba:2.9.0-debian13 AS base
 
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
 
-# Models come straight from the mfa-models release assets. `mfa model download`
-# goes through the GitHub API, whose unauthenticated rate limit fails CI builds.
-# The acoustic zip is pre-extracted so the service never unpacks it per request.
-# This layer depends on nothing else, so it sits first and survives every
-# dependency change.
+# Release assets, not `mfa model download`: that uses the GitHub API, whose rate limit fails CI.
 ENV MODEL_DIR=/opt/mfa-models
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         https://github.com/MontrealCorpusTools/mfa-models/releases/download/acoustic-english_us_arpa-v3.0.0/english_us_arpa.zip \
     && unzip -q /tmp/english_us_arpa.zip -d $MODEL_DIR/acoustic \
     && rm /tmp/english_us_arpa.zip \
-    && curl -fsSL -o $MODEL_DIR/dictionary/english_us_arpa.dict \
+    && curl -fsSL -o $MODEL_DIR/dictionary/english_us_arpa.base.dict \
         https://github.com/MontrealCorpusTools/mfa-models/releases/download/dictionary-english_us_arpa-v3.0.0/english_us_arpa.dict \
     && chown -R $MAMBA_USER:$MAMBA_USER $MODEL_DIR
 USER $MAMBA_USER
@@ -36,6 +32,11 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 ENV MFA_ROOT_DIR=/tmp/mfa
 
 WORKDIR /app
+
+COPY --chown=$MAMBA_USER:$MAMBA_USER dictionary/custom.dict /app/dictionary/custom.dict
+RUN cat $MODEL_DIR/dictionary/english_us_arpa.base.dict /app/dictionary/custom.dict \
+        > $MODEL_DIR/dictionary/english_us_arpa.dict
+
 COPY --chown=$MAMBA_USER:$MAMBA_USER app/ /app/app/
 
 ENV PORT=8080

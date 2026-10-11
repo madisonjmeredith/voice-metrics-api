@@ -14,7 +14,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app.aligner import Alignment, PhoneSpan, WordSpan
+from app.aligner import Alignment, LoadedAligner, PhoneSpan, WordSpan
+from app.worker import ACOUSTIC_DIR, DICTIONARY_PATH
 
 FS = 16000
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -89,6 +90,11 @@ def post_analyze(client, path: Path, transcript="ah", **query):
             files={"audio": (path.name, f, "audio/wav")},
             data={"transcript": transcript},
         )
+
+
+@pytest.fixture(scope="session")
+def aligner() -> LoadedAligner:
+    return LoadedAligner(ACOUSTIC_DIR, DICTIONARY_PATH)
 
 
 @pytest.fixture(scope="session")

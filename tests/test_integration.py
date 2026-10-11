@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 
 from app.converter import get_audio_duration
-from app.worker import ACOUSTIC_DIR, DICTIONARY_PATH
 from tests.conftest import FIXTURES, FS, needs_mfa, post_analyze, write_wav
 from tests.textgrids import parse_textgrid
 
@@ -18,13 +17,6 @@ HELLO_TEXT = "Hello there, world."
 
 # Generous even under emulation; native x86 lands well under a second.
 ALIGN_BUDGET_SECONDS = 5.0
-
-
-@pytest.fixture(scope="module")
-def aligner():
-    from app.aligner import LoadedAligner
-
-    return LoadedAligner(ACOUSTIC_DIR, DICTIONARY_PATH)
 
 
 @needs_mfa
