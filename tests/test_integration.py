@@ -14,6 +14,8 @@ from tests.textgrids import parse_textgrid
 
 HELLO_WAV = FIXTURES / "hello.wav"
 HELLO_TEXT = "Hello there, world."
+PLAYLIST_WAV = FIXTURES / "playlist.wav"
+PLAYLIST_TEXT = "Update the playlist with a decaf vibe."
 
 # Generous even under emulation; native x86 lands well under a second.
 ALIGN_BUDGET_SECONDS = 5.0
@@ -51,6 +53,18 @@ def test_reports_out_of_vocabulary_words(aligner):
     alignment = aligner.align(HELLO_WAV, get_audio_duration(HELLO_WAV), "Hello there, zorblax.")
     assert alignment.oovs == ["zorblax"]
     assert "<unk>" in [w.label for w in alignment.words]
+
+
+@needs_mfa
+def test_aligns_words_from_the_custom_dictionary(aligner):
+    duration = get_audio_duration(PLAYLIST_WAV)
+    alignment = aligner.align(PLAYLIST_WAV, duration, PLAYLIST_TEXT)
+
+    assert [w.label for w in alignment.speech_words] == [
+        "update", "the", "playlist", "with", "a", "decaf", "vibe",
+    ]
+    assert alignment.oovs == []
+    assert alignment.speech_coverage(duration) > 0.9
 
 
 @needs_mfa
