@@ -56,6 +56,44 @@ def test_reports_out_of_vocabulary_words(aligner):
 
 
 @needs_mfa
+@pytest.mark.parametrize(
+    "accented, plain",
+    [
+        ("José", "Jose"),
+        ("Jose\u0301", "Jose"),
+        ("Zoë's", "Zoe's"),
+        ("café-crème", "cafe-creme"),
+        ("coup d'état", "coup d'etat"),
+        ('"José," she said.', '"Jose," she said.'),
+    ],
+)
+def test_an_accented_word_tokenizes_as_its_known_unaccented_spelling(aligner, accented, plain):
+    tokenized = aligner.tokenize(accented)
+    assert tokenized == aligner.tokenize(plain)
+    assert tokenized.in_vocabulary
+
+
+@needs_mfa
+@pytest.mark.parametrize(
+    "typed, expected",
+    [
+        ("Łukasz", ("łukasz", ["łukasz"])),
+        ("L'Oréal", ("l' oréal", ["oréal"])),
+        ("Zorbla\u0300x", ("zorblàx", ["zorblàx"])),
+    ],
+)
+def test_a_word_unknown_without_its_accents_keeps_them(aligner, typed, expected):
+    assert aligner.tokenize(typed) == expected
+
+
+@needs_mfa
+def test_aligns_an_accented_transcript(aligner):
+    alignment = aligner.align(HELLO_WAV, get_audio_duration(HELLO_WAV), "Hélló thére, wörld.")
+    assert [w.label for w in alignment.speech_words] == ["hello", "there", "world"]
+    assert alignment.oovs == []
+
+
+@needs_mfa
 def test_aligns_words_the_release_dictionary_lacks(aligner):
     duration = get_audio_duration(PLAYLIST_WAV)
     alignment = aligner.align(PLAYLIST_WAV, duration, PLAYLIST_TEXT)
@@ -106,7 +144,7 @@ def test_lexicon_through_the_app(app_client):
     assert response.json() == {
         "words": [
             {"word": "Hello", "normalized": "hello", "oovs": [], "in_vocabulary": True},
-            {"word": "Siobhán", "normalized": "siobhán", "oovs": ["siobhán"], "in_vocabulary": False},
+            {"word": "Siobhán", "normalized": "siobhan", "oovs": [], "in_vocabulary": True},
             {"word": "Niamh's", "normalized": "niamh 's", "oovs": [], "in_vocabulary": True},
             {"word": "L'Oréal", "normalized": "l' oréal", "oovs": ["oréal"], "in_vocabulary": False},
             {"word": "...", "normalized": "", "oovs": [], "in_vocabulary": False},

@@ -11,6 +11,8 @@ Everything from kalpy and MFA is imported lazily so the dataclasses and label
 sets here can be used on machines without the conda environment.
 """
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -89,6 +91,28 @@ class Tokenized(NamedTuple):
     @property
     def in_vocabulary(self) -> bool:
         return bool(self.normalized.strip()) and not self.oovs
+
+
+def _strip_marks(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", text)
+    return unicodedata.normalize(
+        "NFC", "".join(c for c in decomposed if not unicodedata.combining(c))
+    )
+
+
+def fold_accents(transcript: str, tokenizer) -> str:
+    """Drop the combining marks from each word that is OOV with them and known without."""
+    if transcript.isascii():
+        return transcript
+
+    def fold(match: re.Match) -> str:
+        chunk = match.group()
+        if chunk.isascii() or not tokenizer(chunk).oovs:
+            return chunk
+        stripped = _strip_marks(chunk)
+        return chunk if tokenizer(stripped).oovs else stripped
+
+    return re.sub(r"\S+", fold, unicodedata.normalize("NFC", transcript))
 
 
 class AlignmentError(Exception):
@@ -171,7 +195,7 @@ class LoadedAligner:
 
     def tokenize(self, transcript: str) -> Tokenized:
         """Normalize a transcript the way MFA will; returns (text, oov words)."""
-        tokenized = self._tokenizer(transcript)
+        tokenized = self._tokenizer(fold_accents(transcript, self._tokenizer))
         return Tokenized(tokenized.normalized_text, sorted(set(tokenized.oovs)))
 
     def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:

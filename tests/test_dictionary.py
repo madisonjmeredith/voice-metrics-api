@@ -4,6 +4,7 @@ acoustic model lacks loads without complaint and crashes the worker once its
 word is aligned, so the format checks run without MFA.
 """
 
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,7 @@ def test_entries_are_a_word_a_tab_and_arpabet_phones(path):
         assert line.count("\t") == 1, line
         word, pronunciation = line.split("\t")
         assert word == word.lower() and word.split() == [word], line
+        assert word == unicodedata.normalize("NFC", word), line
         assert ARPABET.issuperset(pronunciation.split(" ")), line
 
 
