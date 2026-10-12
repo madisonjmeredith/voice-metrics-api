@@ -19,7 +19,7 @@ synthesizer). Nothing from this repo goes back the other way. Ever.
 | --- | --- |
 | `app/main.py` | FastAPI app (`/analyze`, `/lexicon`), validation, error-to-status table, response assembly |
 | `app/worker.py` | One aligner process: model paths, warm-up, hard timeout, restart on crash; runs alignments and lexicon checks |
-| `app/aligner.py` | In-process MFA alignment via kalpy; span dataclasses and the tokenizer's result |
+| `app/aligner.py` | In-process MFA alignment via kalpy; span dataclasses, the accent fold, and the tokenizer's result |
 | `app/analyzer.py` | Praat pitch and formant tracks (from formantry) |
 | `app/measurement.py` | One F0/F1–F3 reading per phone at its midpoint |
 | `app/scoring.py` | Port of the reference `resonance.py`: outliers, z-scores, weights |
@@ -29,6 +29,7 @@ synthesizer). Nothing from this repo goes back the other way. Ever.
 | `dictionary/LICENSE.cmudict` | CMUdict's BSD 2-clause license, verbatim; stays beside the entries |
 | `dictionary/custom.dict` | Hand-written words neither of those has; appended last |
 | `tests/textgrids.py` | praatio TextGrid parser, used only to turn checked-in alignments into fixtures |
+| `tests/test_aligner.py` | The accent fold's rules over a stand-in tokenizer; runs without MFA |
 | `tests/test_worker.py` | The pool's restart rules over a worker with no aligner in it; runs without MFA |
 | `spike/` | Timing script, the parity-number generator, and `cmudict_gap.py`, which regenerates `cmudict.dict`; not shipped |
 
@@ -56,7 +57,7 @@ been measured on native amd64.
 **The lexicon check runs in the aligner process, and it never restarts it.**
 `POST /lexicon` calls `LoadedAligner.tokenize` through the pool, so its answer
 is what an alignment would do by construction, and a change to `tokenize`
-(#10's accent fold, if it lands) shows up there with no further work. The
+shows up there with no further work, as #10's accent fold did. The
 alternative was measured in #7: MFA's `SimpleTokenizer` over a word set read
 from the merged dictionary, in the API process. It matched the worker on 61 of
 61 inputs at 3.7 µs per entry, but importing MFA took the API process from 144
@@ -76,7 +77,10 @@ check that arrives as a reload begins waits out `ALIGN_TIMEOUT` and gets that
 `align` uses for `EmptyTranscriptError`, and nothing in `oovs`. `<unk>` and
 `<eps>` read as in vocabulary because they are symbols in MFA's word table;
 `/analyze`'s `oovs` has the same blind spot. The caps (1,000 entries of 200
-characters) bound how long one check holds the worker.
+characters) bound how long one check holds the worker. The slowest batch at
+the caps measured so far is 1,000 entries of 100 one-letter accented chunks:
+about 617 ms of tokenizer time under emulation, against about 220 ms before
+the accent fold.
 
 **A call restarts only the pool it was queued on, and `shutdown()` does not
 cancel queued futures.** Every call queued on the one worker fails together
@@ -138,8 +142,44 @@ period, 89 stay OOV once the alphabetic entries are in. Do not edit the file
 by hand. Rerun the script when the pinned commit or the release dictionary
 changes, and only then. CMUdict is BSD 2-clause and its first clause deems the
 file's contents source code, so `dictionary/LICENSE.cmudict` and the `NOTICE`
-entry stay with the entries. CMUdict is ASCII-only, so accented spellings (#10)
-and names it lacks are still OOV.
+entry stay with the entries. CMUdict is ASCII-only, so an accented spelling is
+known only through the fold below, and names CMUdict lacks are still OOV.
+
+**An accented word that is OOV aligns as its unaccented spelling.** None of
+the merged dictionary's 254,544 headwords has a non-ASCII character (#10).
+`fold_accents` in `aligner.py` NFC-normalizes the transcript, then takes each
+whitespace-delimited chunk that is not ASCII and has an OOV in it, strips its
+combining marks, and keeps the stripped chunk only if nothing in it is OOV.
+MFA's tokenizer then normalizes the rewritten transcript as before, so a
+folded word gets exactly what its unaccented spelling gets: `coup d'état`
+reaches the `d'etat` headword, where a fold on the already-split parts would
+give `d' etat`. Do not move the fold after the split or into a copy of the
+tokenizer's loop. An ASCII transcript returns before the tokenizer is called:
+10.3 µs before and 10.5 µs after for a sentence under emulation, against 20.5
+to 45.5 µs for one with five accented words. All-or-nothing per chunk keeps
+`oovs` in the caller's spelling (`Łódź` would half-fold to `łodz`), at the
+cost that `Zoë-Zorblax`, or two words run together around an em dash, stays
+OOV whole when the other half is unknown. NFC comes first so a decomposed
+spelling reaches an accented headword before any fold is tried. That makes an
+accented entry in `custom.dict` the override for a wrong fold in either
+Unicode form; checked on a copy of the dictionary with `rosé` appended, where
+both forms tokenized as `rosé` and `José` still folded. Wrong folds are real:
+of 76 loanwords and names ending in é or ée, 72 fold into vocabulary and 42
+of those land on a headword with no pronunciation ending in EY (`rosé` on
+`rose`, `exposé` on `expose`, `pâté` on `pate`); `résumé` is fine because
+`resume` carries R EH1 Z AH0 M EY2. Decided in #10: fold them all and add an
+entry only when a word matters, since the unaccented spelling typed today gets
+the same pronunciation, and add no response field. `oovs` keeps the spelling
+of anything still unknown, and `words` and `/lexicon`'s `normalized` show the
+unaccented spelling of anything folded. A letter that is not a base plus a
+mark (`ł`, `ø`, `đ`, `ß`, `æ`) does not fold and needs its own headword. A
+lone combining mark normalizes to nothing instead of an OOV, and a fold inside
+a bracketed annotation changes only the OOV string. Across the first-name
+lists of the 60 faker 40.43.0 locales whose names are all Latin script, 13,308
+of 21,374 distinct names were OOV before the fold and 12,036 after.
+`tests/test_aligner.py` covers the rules over a stand-in tokenizer and runs
+without MFA; its decomposed inputs are written as escapes because an editor
+can normalize a literal combining character without a test noticing.
 
 **Extra words are merged into the dictionary at build time.** The release
 asset is saved as `english_us_arpa.base.dict` and the Dockerfile appends
@@ -160,7 +200,9 @@ syntax either: `# note` parses as the word `#` with the phone `note`. A line
 with no phones raises in `load_pronunciations` and the aligner never becomes
 ready. The format checks run without MFA so a typo is caught before a build.
 They cover `cmudict.dict` and `custom.dict` alike, and one of them fails when
-the two files share a headword. In the image the same file checks that its
+the two files share a headword. Every headword must be NFC, because
+`fold_accents` NFC-normalizes the transcript and a decomposed headword could
+never match. In the image the same file checks that its
 hardcoded phone inventory equals the model's, that every word in either file
 tokenizes, and that the loaded dictionary's lines for each file's words are
 exactly that file's. That last one fails on a lost or stale merge and on a

@@ -46,7 +46,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
 
 - `sample_count` and `phone_count` are the same number, the phones measured.
   `scored_phone_count` is how many had reference statistics.
-- `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. [`POST /lexicon`](#post-lexicon) checks a word before anything is recorded and [Adding a word](#adding-a-word) covers adding one.
+- `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. An accented word is missing only if its unaccented spelling is missing too (see [Accented words](#accented-words)). [`POST /lexicon`](#post-lexicon) checks a word before anything is recorded and [Adding a word](#adding-a-word) covers adding one.
 - `suspicious` is set when an aligned phone runs longer than 0.8 s or a word longer than 2 s. Slow, deliberate reading can trip it and mismatched audio usually won't. The aligner puts audio the transcript doesn't cover into silence instead of stretching a speech label, so `speech_coverage` is the field for that.
 - `speech_coverage` is the share of the clip that sits under aligned speech phones, from 0 to 1. Silence and out-of-vocabulary words don't count toward it, so a transcript with entries in `oovs` reads lower. Check it for audio that didn't match the transcript. `word_count` can't tell you that because the aligner places every in-vocabulary word no matter what the audio holds. In the seven takes measured so far, a real read came back at 0.78 to 0.82 (slow reads included) and tones or looped clips at 0.02 to 0.22. The service reports the number and leaves the floor to you. It can't catch a clip that is dense with speech but has the wrong words (0.73 in the one case measured) because forced alignment has no way to tell which words were said.
 - `z` is the phone's F0–F3 as standard deviations from the population mean
@@ -71,7 +71,7 @@ You get one result per entry in the order you sent them:
 {
   "words": [
     { "word": "Hello",   "normalized": "hello",    "oovs": [],          "in_vocabulary": true },
-    { "word": "Siobhán", "normalized": "siobhán",  "oovs": ["siobhán"], "in_vocabulary": false },
+    { "word": "Siobhán", "normalized": "siobhan",  "oovs": [],          "in_vocabulary": true },
     { "word": "Niamh's", "normalized": "niamh 's", "oovs": [],          "in_vocabulary": true },
     { "word": "L'Oréal", "normalized": "l' oréal", "oovs": ["oréal"],   "in_vocabulary": false },
     { "word": "...",     "normalized": "",         "oovs": [],          "in_vocabulary": false }
@@ -80,7 +80,7 @@ You get one result per entry in the order you sent them:
 ```
 
 - `word` is the entry as sent.
-- `normalized` is the text the aligner would align. It's lowercased and its punctuation is dropped. A word with an apostrophe or a hyphen that the dictionary doesn't have whole is usually split into its parts, so one entry can come back as several words.
+- `normalized` is the text the aligner would align. It's lowercased and its punctuation is dropped. A word with an apostrophe or a hyphen that the dictionary doesn't have whole is usually split into its parts, so one entry can come back as several words. An accented word the dictionary lacks comes back without its accents when that spelling is known. That's why `Siobhán` is `siobhan` here while `oréal` kept its accent.
 - `oovs` lists the parts of `normalized` that the dictionary lacks. They're the strings `/analyze` would report in its own `oovs` and the headwords to add under [Adding a word](#adding-a-word).
 - `in_vocabulary` is true when the entry has something to align and nothing in `oovs`. An entry that normalizes to nothing, like `"..."`, is false.
 
@@ -128,6 +128,20 @@ python spike/cmudict_gap.py
 
 It keeps the entries whose word is all letters and isn't in the release dictionary. It also rewrites `dictionary/LICENSE.cmudict`, CMUdict's license, which has to stay beside the entries.
 
+### Accented words
+
+None of the three files has an accented headword. When a transcript word is out of vocabulary as typed, the aligner looks it up again without its accents and uses that spelling if the dictionary has it. `José` aligns as `jose`, `Zoë's` as `zoe's`, and `café-crème` as `cafe creme`. It doesn't matter whether an accent arrives as one composed character or as a letter followed by a combining mark.
+
+The unaccented spelling is what you'll see in `words` from `/analyze` and in `normalized` from `/lexicon`. A word that's still unknown keeps its accents in `oovs`, so `L'Oréal` reports `oréal`.
+
+The second lookup has three limits:
+
+1. Only a letter with a separable mark loses anything. `ł`, `ø`, `đ`, `ß`, and `æ` stay as they are. `Łukasz` is out of vocabulary until it has its own entry.
+2. Everything between two spaces is looked up together. `Zoë-Zorblax` stays out of vocabulary whole because `zorblax` is unknown.
+3. The unaccented spelling can be a different word. `rosé` aligns as `rose` and gets that word's pronunciation, R OW1 Z. Of 76 loanwords and names ending in é or ée, 72 had a known unaccented spelling and 42 of those had no pronunciation ending in EY. `résumé` is fine because `resume` already has one (R EH1 Z AH0 M EY2).
+
+An entry for the accented word in `dictionary/custom.dict` fixes the first and the third. A word the dictionary has as typed is never looked up a second time.
+
 ### Adding a word
 
 Add it to `dictionary/custom.dict`. It takes effect on the next image build.
@@ -142,6 +156,7 @@ journaling	JH ER1 N L IH0 NG
 - Keep the lines sorted and unique.
 - The format has no comments. A line that starts with `#` is read as a word.
 - A word can have more than one line, one per pronunciation. The aligner uses whichever fits the audio.
+- A word can have accents. Write it with composed characters (NFC), which the checks require. The aligner uses an accented entry before it tries the unaccented spelling, so this is how you fix a word like `rosé` or add one like `łukasz`.
 - Add only words the other two files lack. The checks that run without Docker reject a word `cmudict.dict` has. The suite in the image rejects a word the release dictionary has.
 - Resonance is scored only for phones that have reference statistics. `AE2` and every `AW` have none. Those phones still count toward `speech_coverage` and the pitch figures.
 
