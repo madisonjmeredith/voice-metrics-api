@@ -15,23 +15,14 @@ synthesizer). Nothing from this repo goes back the other way. Ever.
 
 ## Layout
 
-| File | Role |
-| --- | --- |
-| `app/main.py` | FastAPI app (`/analyze`, `/lexicon`), validation, error-to-status table, response assembly |
-| `app/worker.py` | One aligner process: model paths, warm-up, hard timeout, restart on crash; runs alignments and lexicon checks |
-| `app/aligner.py` | In-process MFA alignment via kalpy; span dataclasses, the accent fold, and the tokenizer's result |
-| `app/analyzer.py` | Praat pitch and formant tracks (from formantry) |
-| `app/measurement.py` | One F0/F1–F3 reading per phone at its midpoint |
-| `app/scoring.py` | Port of the reference `resonance.py`: outliers, z-scores, weights |
-| `app/reference/` | `stats.json` and `weights.json`, copied verbatim from upstream |
-| `app/warmup.wav` | 1.3 s clip aligned at startup so the model loads before traffic |
-| `dictionary/cmudict.dict` | CMUdict entries `english_us_arpa` lacks, alphabetic headwords only; generated, appended to the release dictionary at build |
-| `dictionary/LICENSE.cmudict` | CMUdict's BSD 2-clause license, verbatim; stays beside the entries |
-| `dictionary/custom.dict` | Hand-written words neither of those has; appended last |
-| `tests/textgrids.py` | praatio TextGrid parser, used only to turn checked-in alignments into fixtures |
-| `tests/test_aligner.py` | The accent fold's rules over a stand-in tokenizer; runs without MFA |
-| `tests/test_worker.py` | The pool's restart rules over a worker with no aligner in it; runs without MFA |
-| `spike/` | Timing script, the parity-number generator, and `cmudict_gap.py`, which regenerates `cmudict.dict`; not shipped |
+Source is in `app/`, tests in `tests/`. Non-obvious parts:
+
+- `app/reference/` is copied verbatim from the reference project; don't edit it.
+- `app/warmup.wav` is aligned at startup so the model loads before traffic.
+- `dictionary/cmudict.dict` is generated (see below); `dictionary/LICENSE.cmudict` stays beside it; `dictionary/custom.dict` is hand-written and appended last.
+- `tests/textgrids.py` is used only to turn checked-in alignments into fixtures.
+- `tests/test_aligner.py` and `tests/test_worker.py` run without MFA, over stand-ins.
+- `spike/` holds the timing script, the parity-number generator, and `cmudict_gap.py`; not shipped.
 
 ## Decisions that were measured or negotiated, not defaulted
 
@@ -132,8 +123,8 @@ CMUdict pronunciation, and 44 words took 67 s under emulation.
 **CMUdict's missing words are a committed, generated file.** For the 66,015
 headwords the two share, the release dictionary carries a CMUdict
 pronunciation verbatim 96.9% of the time, and it lacks another 60,037 CMUdict
-headwords outright. `dictionary/cmudict.dict` is the 54,684 of those that are
-purely alphabetic (57,253 lines), taken from CMUdict at the commit pinned in
+headwords outright. `dictionary/cmudict.dict` is the ones that are
+purely alphabetic, taken from CMUdict at the commit pinned in
 `spike/cmudict_gap.py`. It is committed instead of fetched at build so the
 format checks cover every line without Docker and the build gains no network
 dependency. Alphabetic only because the tokenizer already splits clitics and
@@ -146,7 +137,7 @@ entry stay with the entries. CMUdict is ASCII-only, so an accented spelling is
 known only through the fold below, and names CMUdict lacks are still OOV.
 
 **An accented word that is OOV aligns as its unaccented spelling.** None of
-the merged dictionary's 254,544 headwords has a non-ASCII character (#10).
+the merged dictionary's headwords has a non-ASCII character (#10).
 `fold_accents` in `aligner.py` NFC-normalizes the transcript, then takes each
 whitespace-delimited chunk that is not ASCII and has an OOV in it, strips its
 combining marks, and keeps the stripped chunk only if nothing in it is OOV.

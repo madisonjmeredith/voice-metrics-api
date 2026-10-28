@@ -115,7 +115,7 @@ while its model loads after startup or a restart.
 The aligner loads one pronunciation dictionary. The image build makes it by appending three files in this order:
 
 1. The `english_us_arpa` release dictionary, downloaded during the build.
-2. `dictionary/cmudict.dict`, the 54,684 words that [CMUdict](https://github.com/cmusphinx/cmudict) has and the release dictionary lacks. `update`, `playlist`, `checkout`, and `liam` are among them.
+2. `dictionary/cmudict.dict`, the words that [CMUdict](https://github.com/cmusphinx/cmudict) has and the release dictionary lacks. `update`, `playlist`, `checkout`, and `liam` are among them.
 3. `dictionary/custom.dict`, for words neither of those has.
 
 `oovs` in a response names the words a transcript needed that none of the three had.
