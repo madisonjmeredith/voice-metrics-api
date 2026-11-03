@@ -13,12 +13,15 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, NamedTuple, Optional
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.aligner import Alignment, AlignmentError, EmptyTranscriptError
 from app.analyzer import AudioAnalyzer
@@ -61,27 +64,74 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Anything a caller can cause, or the aligner can do to itself, has its own
-# exception type; the mapping to a status code lives here and nowhere else.
-ERROR_STATUS = {
-    AudioDecodeError: 400,
-    EmptyTranscriptError: 400,
-    AlignmentError: 422,
-    AlignmentTimeout: 504,
-    AlignerUnavailable: 503,
-    AlignerBusy: 503,
+
+class InvalidTokenError(Exception):
+    """The bearer token is missing or does not match API_TOKEN."""
+
+
+class AudioTooShortError(Exception):
+    """The decoded audio is shorter than MIN_DURATION."""
+
+
+class AudioTooLongError(Exception):
+    """The decoded audio is longer than MAX_DURATION."""
+
+
+class TooLittleSpeechError(Exception):
+    """Fewer than MIN_SCORED_PHONES phones had reference statistics."""
+
+
+class ErrorKind(NamedTuple):
+    status: int
+    code: str
+    retryable: bool
+
+
+# Callers branch on code and retryable: never rename a code; False is a verdict on the audio or transcript.
+ERRORS: dict[type[Exception], ErrorKind] = {
+    InvalidTokenError: ErrorKind(401, "unauthorized", True),
+    AudioDecodeError: ErrorKind(400, "audio_undecodable", False),
+    AudioTooShortError: ErrorKind(400, "audio_too_short", False),
+    AudioTooLongError: ErrorKind(400, "audio_too_long", False),
+    EmptyTranscriptError: ErrorKind(400, "transcript_empty", False),
+    AlignmentError: ErrorKind(422, "alignment_failed", False),
+    TooLittleSpeechError: ErrorKind(422, "too_little_speech", False),
+    AlignmentTimeout: ErrorKind(504, "alignment_timeout", True),
+    AlignerUnavailable: ErrorKind(503, "aligner_unavailable", True),
+    AlignerBusy: ErrorKind(503, "aligner_busy", True),
 }
 
+FRAMEWORK_ERROR_CODES = {400: "invalid_request", 404: "not_found", 405: "method_not_allowed"}
 
-def _status_handler(status: int):
+
+def _error_response(status: int, detail, code: str, retryable: bool, headers=None) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"detail": detail, "code": code, "retryable": retryable},
+        headers=headers,
+    )
+
+
+def _error_handler(kind: ErrorKind):
     async def handler(request: Request, exc: Exception):
-        return JSONResponse(status_code=status, content={"detail": str(exc)})
+        return _error_response(kind.status, str(exc), kind.code, kind.retryable)
 
     return handler
 
 
-for _error_type, _status in ERROR_STATUS.items():
-    app.add_exception_handler(_error_type, _status_handler(_status))
+for _error_type, _kind in ERRORS.items():
+    app.add_exception_handler(_error_type, _error_handler(_kind))
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError):
+    return _error_response(422, jsonable_encoder(exc.errors()), "invalid_request", True)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_error(request: Request, exc: StarletteHTTPException):
+    code = FRAMEWORK_ERROR_CODES.get(exc.status_code, "http_error")
+    return _error_response(exc.status_code, exc.detail, code, True, exc.headers)
 
 
 def require_token(authorization: Optional[str] = Header(None)) -> None:
@@ -89,7 +139,7 @@ def require_token(authorization: Optional[str] = Header(None)) -> None:
     if API_TOKEN is None:
         return
     if authorization != f"Bearer {API_TOKEN}":
-        raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
+        raise InvalidTokenError("Invalid or missing bearer token")
 
 
 def _round(value, digits: int):
@@ -148,9 +198,9 @@ async def analyze(
     with tempfile.TemporaryDirectory() as tmp_dir:
         wav_path, duration = await run_in_threadpool(_save_as_wav, audio, Path(tmp_dir))
         if duration < MIN_DURATION:
-            raise HTTPException(400, f"Audio too short. Record at least {MIN_DURATION:.0f} second.")
+            raise AudioTooShortError(f"Audio too short. Record at least {MIN_DURATION:.0f} second.")
         if duration > MAX_DURATION:
-            raise HTTPException(400, f"Audio too long. Keep it under {MAX_DURATION:.0f} seconds.")
+            raise AudioTooLongError(f"Audio too long. Keep it under {MAX_DURATION:.0f} seconds.")
 
         # The Praat tracks need only the WAV, so they are computed while the
         # aligner process works.
@@ -162,8 +212,8 @@ async def analyze(
         aggregates = score(phones)
 
     if aggregates["scored_phone_count"] < MIN_SCORED_PHONES:
-        raise HTTPException(
-            422, "Too little scorable speech. Speak clearly and make sure the transcript matches."
+        raise TooLittleSpeechError(
+            "Too little scorable speech. Speak clearly and make sure the transcript matches."
         )
 
     result = {

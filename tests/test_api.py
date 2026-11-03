@@ -12,7 +12,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app.aligner import Alignment, AlignmentError, Tokenized
+from app.aligner import Alignment, AlignmentError, EmptyTranscriptError, Tokenized
+from app.converter import AudioDecodeError
 from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
 from tests.conftest import needs_ffmpeg, post_analyze, vowel_alignment
 
@@ -103,41 +104,80 @@ def test_oovs_pass_through(client, vowel_a):
     assert body["oovs"] == ["zorblax"]
 
 
+def error_of(response) -> tuple:
+    body = response.json()
+    return (response.status_code, body["code"], body["retryable"])
+
+
+def test_error_codes_are_the_published_contract():
+    assert {error.__name__: tuple(kind) for error, kind in main.ERRORS.items()} == {
+        "InvalidTokenError": (401, "unauthorized", True),
+        "AudioDecodeError": (400, "audio_undecodable", False),
+        "AudioTooShortError": (400, "audio_too_short", False),
+        "AudioTooLongError": (400, "audio_too_long", False),
+        "EmptyTranscriptError": (400, "transcript_empty", False),
+        "AlignmentError": (422, "alignment_failed", False),
+        "TooLittleSpeechError": (422, "too_little_speech", False),
+        "AlignmentTimeout": (504, "alignment_timeout", True),
+        "AlignerUnavailable": (503, "aligner_unavailable", True),
+        "AlignerBusy": (503, "aligner_busy", True),
+    }
+    assert main.FRAMEWORK_ERROR_CODES == {
+        400: "invalid_request",
+        404: "not_found",
+        405: "method_not_allowed",
+    }
+    codes = [kind.code for kind in main.ERRORS.values()]
+    assert len(set(codes)) == len(codes)
+
+
 @needs_ffmpeg
 def test_too_short(client, vowel_a_short):
     with client(FakeAligner(vowel_alignment())) as c:
         response = post_analyze(c, vowel_a_short)
-    assert response.status_code == 400
+    assert error_of(response) == tuple(main.ERRORS[main.AudioTooShortError])
     assert "short" in response.json()["detail"]
+
+
+@needs_ffmpeg
+def test_too_long(client, vowel_a, monkeypatch):
+    monkeypatch.setattr(main, "MAX_DURATION", 1.0)
+    with client(FakeAligner(vowel_alignment())) as c:
+        response = post_analyze(c, vowel_a)
+    assert error_of(response) == tuple(main.ERRORS[main.AudioTooLongError])
+    assert "long" in response.json()["detail"]
 
 
 @needs_ffmpeg
 def test_undecodable_audio(client, garbage):
     with client(FakeAligner(vowel_alignment())) as c:
         response = post_analyze(c, garbage)
-    assert response.status_code == 400
+    assert error_of(response) == tuple(main.ERRORS[AudioDecodeError])
+    assert isinstance(response.json()["detail"], str)
 
 
 def test_missing_transcript(client, vowel_a):
     with client(FakeAligner(vowel_alignment())) as c:
         with open(vowel_a, "rb") as f:
             response = c.post("/analyze", files={"audio": ("a.wav", f, "audio/wav")})
-    assert response.status_code == 422
+    assert error_of(response) == (422, "invalid_request", True)
+    assert [error["loc"] for error in response.json()["detail"]] == [["body", "transcript"]]
 
 
 @needs_ffmpeg
 @pytest.mark.parametrize(
-    "error, status",
+    "error",
     [
-        (AlignmentError("beam too narrow"), 422),
-        (AlignmentTimeout("Alignment exceeded 10 s"), 504),
-        (AlignerUnavailable("worker died"), 503),
+        EmptyTranscriptError("Transcript has no alignable words."),
+        AlignmentError("beam too narrow"),
+        AlignmentTimeout("Alignment exceeded 10 s"),
+        AlignerUnavailable("worker died"),
     ],
 )
-def test_aligner_failures_map_to_status_codes(client, vowel_a, error, status):
+def test_aligner_failures_map_to_status_and_code(client, vowel_a, error):
     with client(FakeAligner(error=error)) as c:
         response = post_analyze(c, vowel_a)
-    assert response.status_code == status
+    assert error_of(response) == tuple(main.ERRORS[type(error)])
     assert response.json()["detail"] == str(error)
 
 
@@ -145,7 +185,18 @@ def test_aligner_failures_map_to_status_codes(client, vowel_a, error, status):
 def test_too_few_scored_phones(client, silence):
     with client(FakeAligner(vowel_alignment())) as c:
         response = post_analyze(c, silence)
-    assert response.status_code == 422
+    assert error_of(response) == tuple(main.ERRORS[main.TooLittleSpeechError])
+
+
+@pytest.mark.parametrize(
+    "path, status, code, allow",
+    [("/nowhere", 404, "not_found", None), ("/analyze", 405, "method_not_allowed", "POST")],
+)
+def test_routing_errors_carry_a_code(client, path, status, code, allow):
+    with client(FakeAligner()) as c:
+        response = c.get(path)
+    assert error_of(response) == (status, code, True)
+    assert response.headers.get("allow") == allow
 
 
 @needs_ffmpeg
@@ -155,7 +206,7 @@ def test_bearer_token_when_configured(client, vowel_a, monkeypatch):
         denied = post_analyze(c, vowel_a)
         c.headers["Authorization"] = "Bearer s3cret"
         allowed = post_analyze(c, vowel_a)
-    assert denied.status_code == 401
+    assert error_of(denied) == tuple(main.ERRORS[main.InvalidTokenError])
     assert allowed.status_code == 200
 
 
@@ -202,7 +253,7 @@ def test_lexicon_accepts_a_batch_at_the_caps(client):
 def test_lexicon_rejects_a_malformed_batch(client, body):
     with client(FakeAligner()) as c:
         response = c.post("/lexicon", json=body)
-    assert response.status_code == 422
+    assert error_of(response) == (422, "invalid_request", True)
 
 
 @pytest.mark.parametrize(
@@ -212,7 +263,7 @@ def test_lexicon_rejects_a_malformed_batch(client, body):
 def test_lexicon_answers_503_when_the_aligner_cannot(client, error):
     with client(FakeAligner(error=error)) as c:
         response = c.post("/lexicon", json={"words": ["hello"]})
-    assert response.status_code == 503
+    assert error_of(response) == tuple(main.ERRORS[type(error)])
     assert response.json()["detail"] == str(error)
 
 
@@ -222,5 +273,5 @@ def test_lexicon_needs_the_bearer_token_when_configured(client, monkeypatch):
         denied = c.post("/lexicon", json={"words": ["hello"]})
         c.headers["Authorization"] = "Bearer s3cret"
         allowed = c.post("/lexicon", json={"words": ["hello"]})
-    assert denied.status_code == 401
+    assert error_of(denied) == tuple(main.ERRORS[main.InvalidTokenError])
     assert allowed.status_code == 200
