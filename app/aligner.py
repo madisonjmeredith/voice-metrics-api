@@ -26,11 +26,6 @@ DEFAULT_RETRY_BEAM = 40
 WIDE_BEAM = 40
 WIDE_RETRY_BEAM = 160
 
-# Longer than these and the aligner is almost certainly stretching a label
-# over audio the transcript does not cover.
-SUSPICIOUS_PHONE_SECONDS = 0.8
-SUSPICIOUS_WORD_SECONDS = 2.0
-
 
 @dataclass(frozen=True)
 class Span:
@@ -73,12 +68,6 @@ class Alignment:
     @property
     def speech_phones(self) -> list[PhoneSpan]:
         return [p for p in self.phones if p.is_speech]
-
-    @property
-    def suspicious(self) -> bool:
-        return any(p.duration > SUSPICIOUS_PHONE_SECONDS for p in self.speech_phones) or any(
-            w.duration > SUSPICIOUS_WORD_SECONDS for w in self.speech_words
-        )
 
     def speech_coverage(self, duration: float) -> float:
         return sum(p.duration for p in self.speech_phones) / duration

@@ -36,7 +36,7 @@ def main(pairs):
             alignment = aligner.align(wav, duration, text)
             stopwatch(f"[{round_name}] align {wav.name} ({duration:.1f}s)", t)
             if round_name == "warm":
-                print("  oovs:", alignment.oovs, "| suspicious:", alignment.suspicious)
+                print("  oovs:", alignment.oovs)
                 for word in alignment.speech_words[:12]:
                     print(f"  {word.label:>12} {word.start:6.2f}-{word.end:6.2f}")
 

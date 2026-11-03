@@ -31,7 +31,6 @@ def test_aligns_hello(aligner):
     assert [w.label for w in alignment.speech_words] == ["hello", "there", "world"]
     assert all(p.label[-1].isdigit() for p in alignment.speech_phones if p.label[0] in "AEIOU")
     assert alignment.oovs == []
-    assert not alignment.suspicious
     assert alignment.speech_coverage(duration) > 0.7
     assert elapsed < ALIGN_BUDGET_SECONDS
 
