@@ -18,6 +18,7 @@ Differences from the original, on purpose:
 
 import json
 import statistics
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,8 @@ OUTLIER_STDEVS = 2.0
 # 1.5 pooled standard deviations "brighter" than average scores 1.0.
 Z_SCALE = 3.0
 CENTER = 0.5
+
+SONORANTS = frozenset({"L", "M", "N", "NG", "R", "W", "Y"})
 
 
 def _load_json(name: str):
@@ -87,6 +90,17 @@ def phone_resonance(z: list[Optional[float]]) -> Optional[float]:
     return clamp(weighted / Z_SCALE + CENTER)
 
 
+def is_balanced_label(label: str) -> bool:
+    return label[-1].isdigit() or label in SONORANTS
+
+
+def label_means(phones: list[MeasuredPhone]) -> list[float]:
+    by_label: dict[str, list[float]] = defaultdict(list)
+    for phone in phones:
+        by_label[phone.label].append(phone.resonance)
+    return [statistics.mean(values) for values in by_label.values()]
+
+
 def describe(values: list[float]) -> dict:
     if not values:
         return {"mean": None, "median": None, "stdev": None, "min": None, "max": None}
@@ -113,16 +127,21 @@ def score(phones: list[MeasuredPhone]) -> dict:
 
     kept = [p for p in phones if not p.outlier]
     pitch = [p.F[0] for p in kept if p.F[0] is not None]
-    resonance = [p.resonance for p in kept if p.resonance is not None]
+    scored = [p for p in kept if p.resonance is not None]
+    resonance = [p.resonance for p in scored]
     resonance_stats = describe(resonance)
+    balanced = [p for p in scored if is_balanced_label(p.label)]
 
     return {
         "pitch": describe(pitch),
-        "resonance": {k: resonance_stats[k] for k in ("mean", "median", "stdev")},
+        "resonance": {
+            **{k: resonance_stats[k] for k in ("mean", "median", "stdev")},
+            "balanced": describe(label_means(balanced))["mean"],
+        },
         "formants": {
             f"f{i}": describe([p.F[i] for p in kept if p.F[i] is not None]) for i in (1, 2, 3)
         },
         "phone_count": len(phones),
         "scored_phone_count": sum(1 for p in phones if p.resonance is not None),
-        "readings": {"pitch": len(pitch), "resonance": len(resonance)},
+        "readings": {"pitch": len(pitch), "resonance": len(resonance), "balanced": len(balanced)},
     }

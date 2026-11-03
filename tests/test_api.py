@@ -74,7 +74,7 @@ def test_analyze_returns_prosody_compatible_aggregates(client, vowel_a):
     assert body["speech_coverage"] == pytest.approx(0.867, abs=0.001)
     assert set(body["pitch"]) == {"mean", "median", "stdev", "min", "max", "unit"}
     assert body["pitch"]["mean"] == pytest.approx(140.0, abs=3.0)
-    assert set(body["resonance"]) == {"mean", "median", "stdev"}
+    assert set(body["resonance"]) == {"mean", "median", "stdev", "balanced"}
     assert 0.0 <= body["resonance"]["mean"] <= 1.0
     assert set(body["formants"]) == {"f1", "f2", "f3", "unit"}
     assert "phones" not in body and "words" not in body
@@ -186,6 +186,13 @@ def test_aligner_failures_map_to_status_and_code(client, vowel_a, error):
 def test_too_few_scored_phones(client, silence):
     with client(FakeAligner(vowel_alignment())) as c:
         response = post_analyze(c, silence)
+    assert error_of(response) == tuple(main.ERRORS[main.TooLittleSpeechError])
+
+
+@needs_ffmpeg
+def test_too_few_vowels_and_sonorants(client, vowel_a):
+    with client(FakeAligner(vowel_alignment(labels=("S", "T", "SH", "AA1")))) as c:
+        response = post_analyze(c, vowel_a)
     assert error_of(response) == tuple(main.ERRORS[main.TooLittleSpeechError])
 
 

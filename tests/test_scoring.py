@@ -2,7 +2,7 @@ import pytest
 
 from app.aligner import PhoneSpan
 from app.measurement import MeasuredPhone
-from app.scoring import STATS, WEIGHTS, phone_resonance, score
+from app.scoring import STATS, WEIGHTS, is_balanced_label, phone_resonance, score
 from tests.parity_data import PARITY_PHONES
 
 # Produced by spike/parity_expected.py from the reference implementation.
@@ -70,6 +70,7 @@ def test_counts_distinguish_measured_from_scored():
             for r, outlier in zip(UPSTREAM["per_phone"], UPSTREAM["outliers"])
             if r is not None and not outlier
         ),
+        "balanced": 8,
     }
 
 
@@ -106,8 +107,9 @@ def test_empty_input():
     aggregates = score([])
     assert aggregates["pitch"]["mean"] is None
     assert aggregates["resonance"]["median"] is None
+    assert aggregates["resonance"]["balanced"] is None
     assert aggregates["scored_phone_count"] == 0
-    assert aggregates["readings"] == {"pitch": 0, "resonance": 0}
+    assert aggregates["readings"] == {"pitch": 0, "resonance": 0, "balanced": 0}
 
 
 def test_single_phone_has_no_stdev():
@@ -116,3 +118,42 @@ def test_single_phone_has_no_stdev():
     assert aggregates["pitch"]["stdev"] is None
     assert aggregates["resonance"]["stdev"] is None
     assert aggregates["resonance"]["mean"] == pytest.approx(phones[0].resonance)
+
+
+def _at(label: str, z1: float) -> tuple[str, list[float]]:
+    """Readings that sit z1 pooled standard deviations from the label's mean F1."""
+    reference = STATS[label]
+    return (label, [180.0, reference[1]["mean"] + z1 * reference[1]["stdev"],
+                    reference[2]["mean"], reference[3]["mean"]])
+
+
+def test_balanced_counts_each_label_once():
+    phones = _phones([_at("AA1", 0.6)] * 3 + [_at("IY1", -0.6)])
+    aggregates = score(phones)
+
+    assert not any(p.outlier for p in phones)
+    a, b = phones[0].resonance, phones[3].resonance
+    assert aggregates["resonance"]["balanced"] == pytest.approx((a + b) / 2)
+    assert aggregates["resonance"]["mean"] == pytest.approx((3 * a + b) / 4)
+
+
+def test_balanced_leaves_out_obstruents():
+    phones = _phones([_at("AA1", 0.6), _at("IY1", -0.6), _at("S", 1.2)])
+    aggregates = score(phones)
+
+    assert not any(p.outlier for p in phones)
+    assert phones[2].resonance is not None
+    assert aggregates["readings"]["resonance"] == 3
+    assert aggregates["readings"]["balanced"] == 2
+    assert aggregates["resonance"]["balanced"] == pytest.approx(
+        (phones[0].resonance + phones[1].resonance) / 2
+    )
+
+
+@pytest.mark.parametrize(
+    "label, expected",
+    [(label, True) for label in ("AA1", "AH0", "ER1", "L", "M", "N", "NG", "R", "W", "Y")]
+    + [(label, False) for label in ("S", "SH", "T", "HH", "DH", "Z", "JH")],
+)
+def test_only_vowels_and_sonorants_are_balanced(label, expected):
+    assert is_balanced_label(label) is expected

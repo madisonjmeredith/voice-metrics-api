@@ -78,7 +78,7 @@ class AudioTooLongError(Exception):
 
 
 class TooLittleSpeechError(Exception):
-    """Fewer than MIN_SCORED_PHONES phones went into the resonance statistics."""
+    """Fewer than MIN_SCORED_PHONES vowel and sonorant phones went into the resonance statistics."""
 
 
 class TooLittleVoicingError(Exception):
@@ -216,7 +216,7 @@ async def analyze(
         phones = measure_phones(analyzer, alignment)
         aggregates = score(phones)
 
-    if aggregates["readings"]["resonance"] < MIN_SCORED_PHONES:
+    if aggregates["readings"]["balanced"] < MIN_SCORED_PHONES:
         raise TooLittleSpeechError(
             "Too little scorable speech. Speak clearly and make sure the transcript matches."
         )
