@@ -258,6 +258,20 @@ keeps. The balanced readings are a subset of the other resonance figures'.
 `/lexicon` returns `words[].{word,normalized,oovs,in_vocabulary}`. Nothing
 reads it yet; treat it the same way once something does.
 
+`/analyze`, `/lexicon`, `/health`, and `/` carry a top-level `version`, read
+from `app.__version__` like the OpenAPI schema's (#16). Error bodies don't
+carry it. It is bumped by hand, not stamped from the commit at build time,
+because neither this service nor the client is live and a version that moves
+with every commit is noise during development. It stays in 0.x until launch;
+don't bump it before then unless asked. At launch it becomes 1.0.0, and from
+then on the PR that makes a change also bumps it: major for a breaking change
+to the response or error contract, minor for a new field, endpoint, or code or
+for anything that can move a figure or a refusal for the same recording and
+transcript (a dictionary-only change included), patch for anything a caller
+can't observe. Tag each bump `vX.Y.Z` on main. Nothing bumps or checks it
+automatically: whether a change can move a score is a judgment call, and the
+suite runs in an image without `.git`.
+
 Every error body is `{detail, code, retryable}`, built from `ERRORS` and
 `FRAMEWORK_ERROR_CODES` in `app/main.py` (#1). Callers branch on `code` and
 `retryable`, so never rename or reuse a code, and keep `retryable: false` for

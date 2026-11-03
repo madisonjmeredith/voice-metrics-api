@@ -26,6 +26,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
 
 ```json
 {
+  "version": "0.1.0",
   "duration": 4.82,
   "sample_count": 41,
   "phone_count": 41,
@@ -44,6 +45,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
 }
 ```
 
+- `version` is the version of the service that answered. See [Versioning](#versioning) for when it changes.
 - `sample_count` and `phone_count` are the same number, the phones measured.
   `scored_phone_count` is how many had reference statistics.
 - Every figure in `pitch`, `resonance`, and `formants` is a number. A take with fewer than three phones behind its pitch is refused with `too_little_voicing` instead. One with fewer than three vowels and sonorants behind its resonance is refused with `too_little_speech`. A single phone's `f0` and the formants under `phones` can still be `null`.
@@ -68,6 +70,7 @@ You get one result per entry in the order you sent them:
 
 ```json
 {
+  "version": "0.1.0",
   "words": [
     { "word": "Hello",   "normalized": "hello",    "oovs": [],          "in_vocabulary": true },
     { "word": "Siobhán", "normalized": "siobhan",  "oovs": [],          "in_vocabulary": true },
@@ -78,6 +81,7 @@ You get one result per entry in the order you sent them:
 }
 ```
 
+- `version` is the service's version, the same as in `/analyze`.
 - `word` is the entry as sent.
 - `normalized` is the text the aligner would align. It's lowercased and its punctuation is dropped. A word with an apostrophe or a hyphen that the dictionary doesn't have whole is usually split into its parts, so one entry can come back as several words. An accented word the dictionary lacks comes back without its accents when that spelling is known. That's why `Siobhán` is `siobhan` here while `oréal` kept its accent.
 - `oovs` lists the parts of `normalized` that the dictionary lacks. They're the strings `/analyze` would report in its own `oovs` and the headwords to add under [Adding a word](#adding-a-word).
@@ -91,8 +95,22 @@ It can answer with `unauthorized`, `invalid_request`, `aligner_unavailable`, or 
 
 ### `GET /health`
 
-`{"status": "healthy", "aligner": "ready"}`. The aligner reports `warming`
+`{"version": "0.1.0", "status": "healthy", "aligner": "ready"}`. The aligner reports `warming`
 while its model loads after startup or a restart.
+
+### Versioning
+
+`/analyze`, `/lexicon`, `/health`, and `/` all return a top-level `version`. The OpenAPI schema at `/openapi.json` has the same one. It's a `MAJOR.MINOR.PATCH` number set by hand in `app/__init__.py` and doesn't change with every commit.
+
+The service stays in 0.x until it goes into production. Until then the version makes no promises and changes only when someone bumps it on purpose. Two results with the same 0.x version can still have been scored differently.
+
+From 1.0.0 on, a bump follows these rules:
+
+- Major: a change that breaks the response or the errors, like a field removed or renamed, a code renamed, or a status moved.
+- Minor: a new field, endpoint, or error code, or anything that can change a figure or a refusal for the same recording and transcript. A dictionary change counts even when no code changes.
+- Patch: anything a caller can't see, like docs, tests, or logging.
+
+Two results with the same major and minor version were scored the same way. Keep `version` with any result you store so you can tell which ones you can compare.
 
 ### Errors
 
