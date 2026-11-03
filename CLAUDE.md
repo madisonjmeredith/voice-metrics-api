@@ -40,12 +40,22 @@ while the server boots and again while a 503/504 goes out after a restart;
 `/health` reports `warming` until that finishes. The Praat pass runs
 concurrently with alignment because it needs only the WAV.
 
-A request that arrives during a restart has the reload counted against
-`ALIGN_TIMEOUT` (10 s). Under emulation the reload is now about that long, so
-such a request can time out and trigger another restart. The load has not
-been measured on native amd64.
+Each call gets `ALIGN_TIMEOUT` (10 s) twice (#18): once to reach its turn,
+which covers the warm-up and the calls ahead, and once to run. Running out of
+the first answers `aligner_busy` and restarts nothing. Running out of the
+second restarts the worker and answers `alignment_timeout`, for `/analyze` and
+`/lexicon` alike. Before #18 one clock started at queueing, a reload under
+emulation (about 11.5 s) outlasted it, and each request that arrived after a
+restart killed the reload and started another: after one worker kill, 1
+request per second failed 54 of 54 and a serial client 8 of 8 until traffic
+stopped. A call can now take up to 20 s, inside the client's 30 s HTTP
+timeout. A reload still running after `WARMUP_TIMEOUT` (60 s, about five
+times the emulated reload) is restarted by the next call that gives up on it,
+which answers `aligner_unavailable`; that keeps the self-healing a hung
+reload got from any timeout before. The load has not been measured on native
+amd64.
 
-**The lexicon check runs in the aligner process, and it never restarts it.**
+**The lexicon check runs in the aligner process.**
 `POST /lexicon` calls `LoadedAligner.tokenize` through the pool, so its answer
 is what an alignment would do by construction, and a change to `tokenize`
 shows up there with no further work, as #10's accent fold did. The
@@ -59,11 +69,13 @@ and 1,000 entries take 11 to 13 ms. With four clients looping `/analyze` the
 median stayed near 3 ms, the 90th percentile was 254 to 317 ms, and the
 slowest of 200 took 771 ms. The response shape is the same either way, so the
 check can move in-process later without a caller noticing.
-`AlignerPool.tokenize` raises `AlignerBusy` (503) on a timeout and does not
-restart the pool. A hung alignment's own timeout does that, and a lexicon
-check must not kill a reload or an alignment it was only waiting behind. A
-check that arrives as a reload begins waits out `ALIGN_TIMEOUT` and gets that
-503, because under emulation the reload is about as long. `Tokenized` in
+`AlignerPool.tokenize` shares `align`'s two clocks. Waiting never restarts
+anything, so a check can't kill a reload or an alignment it was only waiting
+behind. A check that itself runs past `ALIGN_TIMEOUT` restarts the worker and
+answers `alignment_timeout`, because nothing else would restart a worker it
+hung. A check that arrives as a reload begins waits out `ALIGN_TIMEOUT` and
+gets `aligner_busy`, because under emulation the reload is about as long.
+`Tokenized` in
 `aligner.py` owns `in_vocabulary`: something left to align, by the test
 `align` uses for `EmptyTranscriptError`, and nothing in `oovs`. `<unk>` and
 `<eps>` read as in vocabulary because they are symbols in MFA's word table;
@@ -73,17 +85,28 @@ the caps measured so far is 1,000 entries of 100 one-letter accented chunks:
 about 617 ms of tokenizer time under emulation, against about 220 ms before
 the accent fold.
 
-**A call restarts only the pool it was queued on, and `shutdown()` does not
-cancel queued futures.** Every call queued on the one worker fails together
-when it is lost. Each handler used to call `restart()`, so the second killed
-the worker the first had just started; `_restart_if_current` compares the pool
-a call was submitted to with the current one. `cancel_futures=True` raced the
-kill. Measured on Python 3.12 with six calls queued, over 10 trials, 39 of 60
-calls surfaced as `asyncio.CancelledError`, which no handler maps to a status;
+**Calls queue in the API process, a call restarts only the pool it arrived
+on, and `shutdown()` does not cancel queued futures.** A call waits for its
+pool's warm-up, then for `_turn` (an `asyncio.Lock`), and only then submits,
+so the executor holds the warm-up and at most one call. Don't move the queue
+back into the executor (#18): `Future.cancel()` can't take back the calls it
+has already moved into its two-slot call queue, so a call whose caller gave
+up would still run with nothing timing it, and if it hung nothing would
+restart the worker. The warm-up wait is shielded because a timeout would
+otherwise cancel the shared warm-up future through `wrap_future`. A call whose
+turn comes after its pool was replaced raises `AlignerUnavailable`, so every
+call waiting on a lost worker fails together with one restart. Each handler
+used to call `restart()`, so the second killed the worker the first had just
+started; `_restart_if_current` compares the pool a call arrived on with the
+current one. `cancel_futures=True` raced the kill. Measured on Python 3.12
+with six calls queued in the executor, over 10 trials, 39 of 60 calls
+surfaced as `asyncio.CancelledError`, which no handler maps to a status;
 without the flag all 60 got `BrokenProcessPool`. Do not add the flag back.
-`tests/test_worker.py` covers both rules without MFA by patching `_init`,
+`tests/test_worker.py` covers these rules without MFA by patching `_init`,
 `_align`, and `_tokenize` to stand-ins that are importable from the spawned
-worker.
+worker, and by pointing `WARMUP_TRANSCRIPT` at a slow or hanging stand-in.
+`_turn` binds to the first event loop that waits on it, so a pool can't be contended
+across two `asyncio.run` calls; start a fresh pool per test.
 
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
@@ -313,6 +336,11 @@ byte for byte against an older container can't show that an aggregation change
 left existing figures alone. Recompute `mean`, `median`, and `stdev` from the
 same response's `include_phones=1` phones (those with a resonance that aren't
 outliers) and check they match it.
+
+To reproduce a worker loss in a running container (#18), kill the aligner process
+with `docker exec <container> sh -c 'kill -9 <pid>'`: the image has no `kill` or
+`pkill` binary. Find the pid by grepping each `/proc/<pid>/cmdline` for `spawn_main`,
+skipping the scanning shell's own `$$`, whose command line contains that string too.
 
 Speech fixtures come from macOS `say`; see `tests/fixtures/README.md`. Synthetic
 vowels come from formantry's source-filter model in `tests/conftest.py`.

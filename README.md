@@ -54,7 +54,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
 - `z` is the phone's F0–F3 as standard deviations from the population mean
   for that phoneme.
 
-It can answer with any of the [errors](#errors) except `aligner_busy`.
+It can answer with any of the [errors](#errors).
 
 ### `POST /lexicon`
 
@@ -87,9 +87,9 @@ You get one result per entry in the order you sent them:
 
 Each entry goes through the tokenizer `/analyze` uses, by itself. An entry can be one word or a whole sentence. A miss isn't an error. The response says whether the dictionary has the word and leaves what to do about it to you.
 
-The check runs in the aligner's worker process. It waits behind an alignment that's in progress and it can't answer while the aligner restarts.
+The check runs in the aligner's worker process. It waits behind an alignment that's in progress or a restart for up to `ALIGN_TIMEOUT`.
 
-It can answer with `unauthorized`, `invalid_request`, `aligner_unavailable`, or `aligner_busy` from [Errors](#errors).
+It can answer with `unauthorized`, `invalid_request`, `aligner_unavailable`, `aligner_busy`, or `alignment_timeout` from [Errors](#errors).
 
 ### `GET /health`
 
@@ -135,9 +135,9 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 | 422 | `too_little_voicing` | false | Fewer than three phones had a measurable pitch, as in a near-silent take |
 | 401 | `unauthorized` | true | The bearer token is missing or wrong |
 | 400, 422 | `invalid_request` | true | A field is missing or invalid (422), or the body couldn't be parsed (400) |
-| 503 | `aligner_unavailable` | true | The aligner process died and a new one is starting |
-| 503 | `aligner_busy` | true | `/lexicon` only: the aligner didn't reach the check within `ALIGN_TIMEOUT` |
-| 504 | `alignment_timeout` | true | Alignment took longer than `ALIGN_TIMEOUT`, so the aligner was restarted |
+| 503 | `aligner_unavailable` | true | The aligner process died or didn't load within `WARMUP_TIMEOUT`, and a new one is starting |
+| 503 | `aligner_busy` | true | The aligner didn't reach the request within `ALIGN_TIMEOUT`, as during a restart. Nothing was restarted |
+| 504 | `alignment_timeout` | true | The request ran longer than `ALIGN_TIMEOUT` once the aligner reached it, so the aligner was restarted |
 | 404 | `not_found` | true | No route at that path |
 | 405 | `method_not_allowed` | true | The path exists but not for that method |
 
@@ -236,7 +236,8 @@ Kaldi build is linux-64. On Apple Silicon the build and the container run
 under emulation.
 
 Environment variables: `PORT` (8080), `API_TOKEN` (unset means no auth),
-`ALIGN_TIMEOUT` seconds (10), `MODEL_DIR` (/opt/mfa-models).
+`ALIGN_TIMEOUT` seconds (10), `WARMUP_TIMEOUT` seconds (60), `MODEL_DIR`
+(/opt/mfa-models).
 
 ## Tests
 
