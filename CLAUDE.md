@@ -268,9 +268,11 @@ then on the PR that makes a change also bumps it: major for a breaking change
 to the response or error contract, minor for a new field, endpoint, or code or
 for anything that can move a figure or a refusal for the same recording and
 transcript (a dictionary-only change included), patch for anything a caller
-can't observe. Tag each bump `vX.Y.Z` on main. Nothing bumps or checks it
-automatically: whether a change can move a score is a judgment call, and the
-suite runs in an image without `.git`.
+can't observe. From 1.0.0, tag each bump `vX.Y.Z` on the merged commit on
+main. Don't tag a 0.x version: every commit until the next bump reports it,
+so the tag would mark only the first of them. Nothing bumps or checks the
+version automatically: whether a change can move a score is a judgment call,
+and the suite runs in an image without `.git`.
 
 Every error body is `{detail, code, retryable}`, built from `ERRORS` and
 `FRAMEWORK_ERROR_CODES` in `app/main.py` (#1). Callers branch on `code` and
