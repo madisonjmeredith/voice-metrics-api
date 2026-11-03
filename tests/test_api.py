@@ -6,12 +6,14 @@ enough to exercise validation, the response shape and the error mapping
 without a conda environment.
 """
 
+import re
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from app import __version__
 from app.aligner import Alignment, AlignmentError, EmptyTranscriptError, Tokenized
 from app.converter import AudioDecodeError
 from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
@@ -65,6 +67,7 @@ def test_analyze_returns_prosody_compatible_aggregates(client, vowel_a):
 
     assert response.status_code == 200, response.text
     body = response.json()
+    assert body["version"] == __version__
     assert body["duration"] == pytest.approx(1.5, abs=0.01)
     assert body["sample_count"] == body["phone_count"] == 4
     assert body["scored_phone_count"] == 4
@@ -260,7 +263,20 @@ def test_bearer_token_when_configured(client, vowel_a, monkeypatch):
 
 def test_health(client):
     with client(FakeAligner(vowel_alignment())) as c:
-        assert c.get("/health").json() == {"status": "healthy", "aligner": "ready"}
+        assert c.get("/health").json() == {
+            "version": __version__,
+            "status": "healthy",
+            "aligner": "ready",
+        }
+
+
+def test_every_endpoint_reports_the_one_version(client):
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__)
+    assert main.app.openapi()["info"]["version"] == __version__
+    with client(FakeAligner()) as c:
+        assert c.get("/").json()["version"] == __version__
+        assert c.get("/health").json()["version"] == __version__
+        assert c.post("/lexicon", json={"words": ["hello"]}).json()["version"] == __version__
 
 
 def test_lexicon_reports_each_word_in_order(client):
@@ -270,6 +286,7 @@ def test_lexicon_reports_each_word_in_order(client):
 
     assert response.status_code == 200, response.text
     assert response.json() == {
+        "version": __version__,
         "words": [
             {"word": "Hello", "normalized": "hello", "oovs": [], "in_vocabulary": True},
             {"word": "Zorblax", "normalized": "zorblax", "oovs": ["zorblax"], "in_vocabulary": False},

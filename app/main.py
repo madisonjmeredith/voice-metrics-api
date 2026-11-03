@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import __version__
 from app.aligner import Alignment, AlignmentError, EmptyTranscriptError
 from app.analyzer import AudioAnalyzer
 from app.converter import AudioDecodeError, convert_to_wav, get_audio_duration
@@ -60,7 +61,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="voice-metrics-api",
     description="Pitch and resonance scoring from a recording and its transcript",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -191,7 +192,11 @@ def _save_as_wav(upload: UploadFile, tmp_path: Path) -> tuple[Path, float]:
 @app.get("/health")
 async def health_check():
     aligner: AlignerPool = app.state.aligner
-    return {"status": "healthy", "aligner": "ready" if aligner.ready else "warming"}
+    return {
+        "version": __version__,
+        "status": "healthy",
+        "aligner": "ready" if aligner.ready else "warming",
+    }
 
 
 @app.post("/analyze", dependencies=[Depends(require_token)])
@@ -226,6 +231,7 @@ async def analyze(
         )
 
     result = {
+        "version": __version__,
         "duration": round(duration, 2),
         "sample_count": aggregates["phone_count"],
         "phone_count": aggregates["phone_count"],
@@ -257,6 +263,7 @@ class LexiconRequest(BaseModel):
 async def lexicon(body: LexiconRequest):
     tokenized = await app.state.aligner.tokenize(body.words)
     return {
+        "version": __version__,
         "words": [
             {
                 "word": word,
@@ -273,6 +280,7 @@ async def lexicon(body: LexiconRequest):
 async def root():
     return {
         "name": "voice-metrics-api",
+        "version": __version__,
         "endpoints": {
             "POST /analyze": "Score a recording against its transcript",
             "POST /lexicon": "Report which words the pronunciation dictionary has",

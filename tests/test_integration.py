@@ -141,13 +141,11 @@ def test_lexicon_through_the_app(app_client):
     response = app_client.post("/lexicon", json={"words": words})
 
     assert response.status_code == 200, response.text
-    assert response.json() == {
-        "words": [
-            {"word": "Hello", "normalized": "hello", "oovs": [], "in_vocabulary": True},
-            {"word": "Siobhán", "normalized": "siobhan", "oovs": [], "in_vocabulary": True},
-            {"word": "Niamh's", "normalized": "niamh 's", "oovs": [], "in_vocabulary": True},
-            {"word": "L'Oréal", "normalized": "l' oréal", "oovs": ["oréal"], "in_vocabulary": False},
-            {"word": "...", "normalized": "", "oovs": [], "in_vocabulary": False},
-            {"word": "Zorblax's", "normalized": "zorblax 's", "oovs": ["zorblax"], "in_vocabulary": False},
-        ]
-    }
+    assert response.json()["words"] == [
+        {"word": "Hello", "normalized": "hello", "oovs": [], "in_vocabulary": True},
+        {"word": "Siobhán", "normalized": "siobhan", "oovs": [], "in_vocabulary": True},
+        {"word": "Niamh's", "normalized": "niamh 's", "oovs": [], "in_vocabulary": True},
+        {"word": "L'Oréal", "normalized": "l' oréal", "oovs": ["oréal"], "in_vocabulary": False},
+        {"word": "...", "normalized": "", "oovs": [], "in_vocabulary": False},
+        {"word": "Zorblax's", "normalized": "zorblax 's", "oovs": ["zorblax"], "in_vocabulary": False},
+    ]
