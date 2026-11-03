@@ -35,7 +35,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
   "suspicious": false,
   "speech_coverage": 0.78,
   "pitch":     { "mean": 181.2, "median": 178.9, "stdev": 24.1, "min": 121.0, "max": 240.3, "unit": "Hz" },
-  "resonance": { "mean": 0.58, "median": 0.57, "stdev": 0.11 },
+  "resonance": { "mean": 0.58, "median": 0.57, "stdev": 0.11, "balanced": 0.61 },
   "formants":  { "f1": { "mean": 512.0, "...": "..." }, "f2": { "...": "..." }, "f3": { "...": "..." }, "unit": "Hz" },
   "words":  [ { "word": "hello", "start": 0.31, "end": 0.62 } ],
   "phones": [ { "phone": "HH", "word_index": 0, "start": 0.31, "end": 0.38, "midpoint": 0.345,
@@ -46,7 +46,8 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
 
 - `sample_count` and `phone_count` are the same number, the phones measured.
   `scored_phone_count` is how many had reference statistics.
-- Every figure in `pitch`, `resonance`, and `formants` is a number. A take with fewer than three phones behind its pitch or its resonance is refused with `too_little_voicing` or `too_little_speech` instead. A single phone's `f0` and the formants under `phones` can still be `null`.
+- Every figure in `pitch`, `resonance`, and `formants` is a number. A take with fewer than three phones behind its pitch is refused with `too_little_voicing` instead. One with fewer than three vowels and sonorants behind its resonance is refused with `too_little_speech`. A single phone's `f0` and the formants under `phones` can still be `null`.
+- `resonance.balanced` is the figure to use when comparing takes of different sentences or checking one against a fixed target. `mean` and `median` count every scored phone so they follow the sentence's mix of sounds as well as the voice. `balanced` averages each vowel and sonorant's mean score (`L`, `M`, `N`, `NG`, `R`, `W`, `Y`, and the vowels) and leaves out stops, fricatives, and affricates, whose midpoint formants aren't resonance. Across 23 voices with only the text varying, a voice's `median` moved by 0.31 of the spread between voices and its `balanced` by 0.18. Its values spread wider across voices than `median` does so a threshold tuned on `median` won't carry over.
 - `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. An accented word is missing only if its unaccented spelling is missing too (see [Accented words](#accented-words)). [`POST /lexicon`](#post-lexicon) checks a word before anything is recorded and [Adding a word](#adding-a-word) covers adding one.
 - `suspicious` is set when an aligned phone runs longer than 0.8 s or a word longer than 2 s. Slow, deliberate reading can trip it and mismatched audio usually won't. The aligner puts audio the transcript doesn't cover into silence instead of stretching a speech label, so `speech_coverage` is the field for that.
 - `speech_coverage` is the share of the clip that sits under aligned speech phones, from 0 to 1. Silence and out-of-vocabulary words don't count toward it, so a transcript with entries in `oovs` reads lower. Check it for audio that didn't match the transcript. `word_count` can't tell you that because the aligner places every in-vocabulary word no matter what the audio holds. In the seven takes measured so far, a real read came back at 0.78 to 0.82 (slow reads included) and tones or looped clips at 0.02 to 0.22. The service reports the number and leaves the floor to you. It can't catch a clip that is dense with speech but has the wrong words (0.73 in the one case measured) because forced alignment has no way to tell which words were said.
@@ -114,7 +115,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 | 400 | `audio_too_long` | false | The audio is longer than 60 seconds |
 | 400 | `transcript_empty` | false | Nothing in the transcript is left to align after normalization |
 | 422 | `alignment_failed` | false | The aligner couldn't align the transcript to the audio, even with a wide beam |
-| 422 | `too_little_speech` | false | Fewer than three phones could be scored |
+| 422 | `too_little_speech` | false | Fewer than three vowels and sonorants could be scored |
 | 422 | `too_little_voicing` | false | Fewer than three phones had a measurable pitch, as in a near-silent take |
 | 401 | `unauthorized` | true | The bearer token is missing or wrong |
 | 400, 422 | `invalid_request` | true | A field is missing or invalid (422), or the body couldn't be parsed (400) |
@@ -137,7 +138,8 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
    per formant. Each remaining phone's F1–F3 are z-scored against the
    population statistics for that phoneme, combined with fitted weights, and
    mapped to 0–1 with 0.5 at the population mean. Pitch and resonance are
-   then summarized across phones.
+   then summarized across phones. `resonance.balanced` first averages each
+   vowel and sonorant label's scores, then averages those.
 
 ## Dictionary
 

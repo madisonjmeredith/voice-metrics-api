@@ -106,6 +106,25 @@ mean, not the midpoint between two reference groups as in the client's old
 service. The client's resonance target will need re-tuning against real data.
 This is a known follow-up, not a bug.
 
+**`resonance.balanced` is the figure that holds across transcripts (#6).**
+`mean` and `median` weight every scored phone once, so they follow the
+transcript's phone mix as well as the voice. `balanced` averages per-label
+means over vowels and sonorants only. Measured over 23 voices (the reference
+project's 21 sample recordings and two of the client's speakers), each voice's
+per-label profile swapped into 55 transcripts, within-voice SD over
+between-voice SD was 0.310 for `median`, 0.311 duration-weighted, 0.252 for
+`mean`, 0.227 counting each label once, and 0.180 for `balanced`. Obstruents
+carry the largest shared per-label offsets (SH −0.30, HH +0.18) because their
+midpoint formants aren't resonance. Comparing against a speaker at 0.5 on
+every phone is a no-op, since that speaker pools to 0.5 on any transcript. The
+working version is a per-label offset table fitted to real voices; it took
+`balanced` to 0.169 and was left out because it would be a committed fit to
+23 voices that needs refitting whenever alignment or measurement shifts.
+`too_little_speech` counts `readings["balanced"]`, a subset of the resonance
+readings; the fewest any of the client's 40 takes had was 5. Its values spread
+wider across voices than `median`'s, so a target tuned on `median` does not
+carry over.
+
 **Reference data is AGPL-3.0.** `stats.json` and `weights.json` are copied
 from Luna McNulty's reference project, which makes this repo a derivative
 work. It is licensed AGPL-3.0 and its source must stay published. Do not
@@ -232,8 +251,9 @@ The client reads `pitch.{mean,median,stdev,min,max}`,
 `resonance.{mean,median,stdev}`, `duration`, and `sample_count`. Keep those
 names and shapes. Anything new is additive. A 200 never carries a null in
 `pitch`, `resonance`, or `formants` (#2): `/analyze` refuses a take with fewer
-than `MIN_SCORED_PHONES` readings behind either statistic, counted from
-`score()`'s `readings`, which leave out the outliers `scored_phone_count` keeps.
+than `MIN_SCORED_PHONES` readings behind pitch or `resonance.balanced`, counted
+from `score()`'s `readings`, which leave out the outliers `scored_phone_count`
+keeps. The balanced readings are a subset of the other resonance figures'.
 
 `/lexicon` returns `words[].{word,normalized,oovs,in_vocabulary}`. Nothing
 reads it yet; treat it the same way once something does.
@@ -266,6 +286,13 @@ CI builds that stage and runs the suite in it.
 The parity test in `tests/test_scoring.py` pins this port to the reference
 implementation's numbers. Regenerate them with `spike/parity_expected.py` if
 `tests/parity_data.py` changes, and only then.
+
+Identical `/analyze` requests to the same container can return different
+pitch, formant, and resonance figures (#28), so comparing a new image's output
+byte for byte against an older container can't show that an aggregation change
+left existing figures alone. Recompute `mean`, `median`, and `stdev` from the
+same response's `include_phones=1` phones (those with a resonance that aren't
+outliers) and check they match it.
 
 Speech fixtures come from macOS `say`; see `tests/fixtures/README.md`. Synthetic
 vowels come from formantry's source-filter model in `tests/conftest.py`.
