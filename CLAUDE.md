@@ -235,6 +235,21 @@ names and shapes. Anything new is additive.
 `/lexicon` returns `words[].{word,normalized,oovs,in_vocabulary}`. Nothing
 reads it yet; treat it the same way once something does.
 
+Every error body is `{detail, code, retryable}`, built from `ERRORS` and
+`FRAMEWORK_ERROR_CODES` in `app/main.py` (#1). Callers branch on `code` and
+`retryable`, so never rename or reuse a code, and keep `retryable: false` for
+a verdict on the audio or transcript and nothing else. A new refusal gets its
+own exception type and a row in `ERRORS`, not an `HTTPException`; the
+contract test in `tests/test_api.py` pins both tables so a change there is
+deliberate. Keep the validation 422's `detail` a list and don't move a
+status: a client that predates `retryable` reads a 400 or 422 with a string
+`detail` as a verdict on the recording and anything else as retryable.
+`FRAMEWORK_ERROR_CODES` is a literal map, not a lookup on `HTTPStatus`,
+because Python 3.13 renamed some phrases (422 reads "Unprocessable Content")
+and the image runs 3.12, while the local `.venv` may be newer. Don't assert
+on standard-library text in unit tests; they can pass locally and fail in the
+image.
+
 ## Tests
 
 ```sh

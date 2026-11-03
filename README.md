@@ -52,10 +52,7 @@ Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
 - `z` is the phone's F0–F3 as standard deviations from the population mean
   for that phoneme.
 
-Errors: `400` for undecodable audio, audio outside 1–60 s, or a transcript
-with no alignable words; `401` for a bad token; `422` when alignment fails or
-too few phones could be scored; `503` while the aligner restarts; `504` if
-alignment times out.
+It can answer with any of the [errors](#errors) except `aligner_busy`.
 
 ### `POST /lexicon`
 
@@ -88,12 +85,42 @@ Each entry goes through the tokenizer `/analyze` uses, by itself. An entry can b
 
 The check runs in the aligner's worker process. It waits behind an alignment that's in progress and it can't answer while the aligner restarts.
 
-Errors: `401` for a bad token; `422` for a body that isn't a list of 1 to 1,000 strings of at most 200 characters each; `503` while the aligner restarts or when it doesn't reach the check within `ALIGN_TIMEOUT`.
+It can answer with `unauthorized`, `invalid_request`, `aligner_unavailable`, or `aligner_busy` from [Errors](#errors).
 
 ### `GET /health`
 
 `{"status": "healthy", "aligner": "ready"}`. The aligner reports `warming`
 while its model loads after startup or a restart.
+
+### Errors
+
+Every error is JSON with the same three fields:
+
+```json
+{ "detail": "Audio too short. Record at least 1 second.", "code": "audio_too_short", "retryable": false }
+```
+
+- `detail` is a message for a person. It's a string, except on a validation `invalid_request`, where it's FastAPI's list of field errors.
+- `code` is the key to branch on or to map to your own copy. Codes are never renamed or reused.
+- `retryable` is `false` only when the service judged the recording or transcript itself, so the same request will always get the same answer. Anything else can work on another try, once the aligner recovers or once the request is fixed.
+
+An unhandled exception comes back as a plain-text 500 with no `retryable` at all. Treat it as retryable.
+
+| Status | `code` | `retryable` | When |
+| --- | --- | --- | --- |
+| 400 | `audio_undecodable` | false | ffmpeg can't decode the upload |
+| 400 | `audio_too_short` | false | The audio is shorter than 1 second |
+| 400 | `audio_too_long` | false | The audio is longer than 60 seconds |
+| 400 | `transcript_empty` | false | Nothing in the transcript is left to align after normalization |
+| 422 | `alignment_failed` | false | The aligner couldn't align the transcript to the audio, even with a wide beam |
+| 422 | `too_little_speech` | false | Fewer than three phones could be scored |
+| 401 | `unauthorized` | true | The bearer token is missing or wrong |
+| 400, 422 | `invalid_request` | true | A field is missing or invalid (422), or the body couldn't be parsed (400) |
+| 503 | `aligner_unavailable` | true | The aligner process died and a new one is starting |
+| 503 | `aligner_busy` | true | `/lexicon` only: the aligner didn't reach the check within `ALIGN_TIMEOUT` |
+| 504 | `alignment_timeout` | true | Alignment took longer than `ALIGN_TIMEOUT`, so the aligner was restarted |
+| 404 | `not_found` | true | No route at that path |
+| 405 | `method_not_allowed` | true | The path exists but not for that method |
 
 ## How it works
 
