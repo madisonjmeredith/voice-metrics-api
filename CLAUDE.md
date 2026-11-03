@@ -230,7 +230,10 @@ it survives every dependency change.
 
 The client reads `pitch.{mean,median,stdev,min,max}`,
 `resonance.{mean,median,stdev}`, `duration`, and `sample_count`. Keep those
-names and shapes. Anything new is additive.
+names and shapes. Anything new is additive. A 200 never carries a null in
+`pitch`, `resonance`, or `formants` (#2): `/analyze` refuses a take with fewer
+than `MIN_SCORED_PHONES` readings behind either statistic, counted from
+`score()`'s `readings`, which leave out the outliers `scored_phone_count` keeps.
 
 `/lexicon` returns `words[].{word,normalized,oovs,in_vocabulary}`. Nothing
 reads it yet; treat it the same way once something does.
