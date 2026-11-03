@@ -223,6 +223,16 @@ curl --json '{"words": ["Hello", "Siobhán"]}' localhost:8080/lexicon
 `--target base` matters: `test` is the Dockerfile's last stage, so a build
 without it produces the test image, with pytest and the suite inside.
 
+To keep a container running in the background and rebuild it after a change, give it a name and replace it each time:
+
+```sh
+docker rm -f voice-metrics-api
+docker build --platform linux/amd64 --target base -t voice-metrics-api .
+docker run -d --name voice-metrics-api --platform linux/amd64 -p 8080:8080 voice-metrics-api
+```
+
+The first line stops and removes the old container so the new one can take its name and port 8080. It does nothing on the first run, when there's no container to remove.
+
 The image is amd64 only: `praat-parselmouth` has no arm64 wheels and MFA's
 Kaldi build is linux-64. On Apple Silicon the build and the container run
 under emulation.
