@@ -78,7 +78,11 @@ class AudioTooLongError(Exception):
 
 
 class TooLittleSpeechError(Exception):
-    """Fewer than MIN_SCORED_PHONES phones had reference statistics."""
+    """Fewer than MIN_SCORED_PHONES phones went into the resonance statistics."""
+
+
+class TooLittleVoicingError(Exception):
+    """Fewer than MIN_SCORED_PHONES phones went into the pitch statistics."""
 
 
 class ErrorKind(NamedTuple):
@@ -96,6 +100,7 @@ ERRORS: dict[type[Exception], ErrorKind] = {
     EmptyTranscriptError: ErrorKind(400, "transcript_empty", False),
     AlignmentError: ErrorKind(422, "alignment_failed", False),
     TooLittleSpeechError: ErrorKind(422, "too_little_speech", False),
+    TooLittleVoicingError: ErrorKind(422, "too_little_voicing", False),
     AlignmentTimeout: ErrorKind(504, "alignment_timeout", True),
     AlignerUnavailable: ErrorKind(503, "aligner_unavailable", True),
     AlignerBusy: ErrorKind(503, "aligner_busy", True),
@@ -211,9 +216,13 @@ async def analyze(
         phones = measure_phones(analyzer, alignment)
         aggregates = score(phones)
 
-    if aggregates["scored_phone_count"] < MIN_SCORED_PHONES:
+    if aggregates["readings"]["resonance"] < MIN_SCORED_PHONES:
         raise TooLittleSpeechError(
             "Too little scorable speech. Speak clearly and make sure the transcript matches."
+        )
+    if aggregates["readings"]["pitch"] < MIN_SCORED_PHONES:
+        raise TooLittleVoicingError(
+            "Too little voiced speech to measure pitch. Check the microphone and speak aloud."
         )
 
     result = {

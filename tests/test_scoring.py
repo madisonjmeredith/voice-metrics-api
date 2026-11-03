@@ -63,6 +63,14 @@ def test_counts_distinguish_measured_from_scored():
     assert aggregates["scored_phone_count"] == sum(
         1 for r in UPSTREAM["per_phone"] if r is not None
     )
+    assert aggregates["readings"] == {
+        "pitch": 10,
+        "resonance": sum(
+            1
+            for r, outlier in zip(UPSTREAM["per_phone"], UPSTREAM["outliers"])
+            if r is not None and not outlier
+        ),
+    }
 
 
 def test_phone_missing_from_stats_is_unscored():
@@ -99,6 +107,7 @@ def test_empty_input():
     assert aggregates["pitch"]["mean"] is None
     assert aggregates["resonance"]["median"] is None
     assert aggregates["scored_phone_count"] == 0
+    assert aggregates["readings"] == {"pitch": 0, "resonance": 0}
 
 
 def test_single_phone_has_no_stdev():

@@ -112,14 +112,17 @@ def score(phones: list[MeasuredPhone]) -> dict:
         phone.resonance = phone_resonance(phone.z) if phone.z is not None else None
 
     kept = [p for p in phones if not p.outlier]
-    resonance = describe([p.resonance for p in kept if p.resonance is not None])
+    pitch = [p.F[0] for p in kept if p.F[0] is not None]
+    resonance = [p.resonance for p in kept if p.resonance is not None]
+    resonance_stats = describe(resonance)
 
     return {
-        "pitch": describe([p.F[0] for p in kept if p.F[0] is not None]),
-        "resonance": {k: resonance[k] for k in ("mean", "median", "stdev")},
+        "pitch": describe(pitch),
+        "resonance": {k: resonance_stats[k] for k in ("mean", "median", "stdev")},
         "formants": {
             f"f{i}": describe([p.F[i] for p in kept if p.F[i] is not None]) for i in (1, 2, 3)
         },
         "phone_count": len(phones),
         "scored_phone_count": sum(1 for p in phones if p.resonance is not None),
+        "readings": {"pitch": len(pitch), "resonance": len(resonance)},
     }

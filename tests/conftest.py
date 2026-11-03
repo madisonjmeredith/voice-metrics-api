@@ -119,6 +119,13 @@ def silence(audio_dir: Path) -> Path:
     return write_wav(audio_dir / "silence.wav", np.zeros(FS * 2))
 
 
+@pytest.fixture(scope="session")
+def hiss(audio_dir: Path) -> Path:
+    """1.5 s of quiet white noise, in which Praat finds formants but no pitch."""
+    noise = np.random.default_rng(0).standard_normal(int(FS * 1.5)) * 0.003
+    return write_wav(audio_dir / "hiss.wav", noise)
+
+
 @pytest.fixture
 def garbage(tmp_path: Path) -> Path:
     path = tmp_path / "garbage.webm"

@@ -118,6 +118,7 @@ def test_error_codes_are_the_published_contract():
         "EmptyTranscriptError": (400, "transcript_empty", False),
         "AlignmentError": (422, "alignment_failed", False),
         "TooLittleSpeechError": (422, "too_little_speech", False),
+        "TooLittleVoicingError": (422, "too_little_voicing", False),
         "AlignmentTimeout": (504, "alignment_timeout", True),
         "AlignerUnavailable": (503, "aligner_unavailable", True),
         "AlignerBusy": (503, "aligner_busy", True),
@@ -186,6 +187,46 @@ def test_too_few_scored_phones(client, silence):
     with client(FakeAligner(vowel_alignment())) as c:
         response = post_analyze(c, silence)
     assert error_of(response) == tuple(main.ERRORS[main.TooLittleSpeechError])
+
+
+@needs_ffmpeg
+def test_hiss_is_too_little_voicing(client, hiss):
+    with client(FakeAligner(vowel_alignment())) as c:
+        response = post_analyze(c, hiss)
+    assert error_of(response) == tuple(main.ERRORS[main.TooLittleVoicingError])
+
+
+def voice_only(monkeypatch, count: int) -> None:
+    """Keep the pitch reading of the first `count` phones and drop the rest."""
+    measure = main.measure_phones
+
+    def measure_some(analyzer, alignment):
+        phones = measure(analyzer, alignment)
+        for phone in phones[count:]:
+            phone.F[0] = None
+        return phones
+
+    monkeypatch.setattr(main, "measure_phones", measure_some)
+
+
+@needs_ffmpeg
+def test_one_voiced_phone_short_is_too_little_voicing(client, vowel_a, monkeypatch):
+    voice_only(monkeypatch, main.MIN_SCORED_PHONES - 1)
+    with client(FakeAligner(vowel_alignment())) as c:
+        response = post_analyze(c, vowel_a)
+    assert error_of(response) == tuple(main.ERRORS[main.TooLittleVoicingError])
+
+
+@needs_ffmpeg
+def test_enough_voiced_phones_leave_no_null_figure(client, vowel_a, monkeypatch):
+    voice_only(monkeypatch, main.MIN_SCORED_PHONES)
+    with client(FakeAligner(vowel_alignment())) as c:
+        response = post_analyze(c, vowel_a)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    for stats in (body["pitch"], body["resonance"], *(body["formants"][f] for f in ("f1", "f2", "f3"))):
+        assert None not in stats.values()
 
 
 @pytest.mark.parametrize(
