@@ -15,6 +15,7 @@ after a restart.
 import asyncio
 import multiprocessing
 import os
+import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -27,6 +28,7 @@ MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/opt/mfa-models"))
 ACOUSTIC_DIR = MODEL_DIR / "acoustic" / "english_us_arpa"
 DICTIONARY_PATH = MODEL_DIR / "dictionary" / "english_us_arpa.dict"
 ALIGN_TIMEOUT = float(os.environ.get("ALIGN_TIMEOUT", "10"))
+WARMUP_TIMEOUT = float(os.environ.get("WARMUP_TIMEOUT", "60"))
 
 WARMUP_WAV = Path(__file__).parent / "warmup.wav"
 WARMUP_TRANSCRIPT = "Hello there, world."
@@ -35,11 +37,11 @@ _ALIGNER: Optional[LoadedAligner] = None
 
 
 class AlignmentTimeout(Exception):
-    """The aligner did not answer in time; it has been restarted."""
+    """The call ran past the timeout once the worker picked it up; the worker has been restarted."""
 
 
 class AlignerUnavailable(Exception):
-    """The aligner process died; a fresh one is starting."""
+    """The aligner process died or never finished loading; a fresh one is starting."""
 
 
 class AlignerBusy(Exception):
@@ -67,14 +69,19 @@ class AlignerPool:
         acoustic_dir: Path = ACOUSTIC_DIR,
         dictionary_path: Path = DICTIONARY_PATH,
         timeout: float = ALIGN_TIMEOUT,
+        warmup_timeout: float = WARMUP_TIMEOUT,
     ) -> None:
         self.acoustic_dir = acoustic_dir
         self.dictionary_path = dictionary_path
         self.timeout = timeout
+        self.warmup_timeout = warmup_timeout
         self._pool: Optional[ProcessPoolExecutor] = None
         self._warmup: Optional[Future] = None
+        self._started_at = 0.0
+        self._turn = asyncio.Lock()
 
     def start(self) -> None:
+        self._started_at = time.monotonic()
         self._pool = ProcessPoolExecutor(
             max_workers=1,
             mp_context=multiprocessing.get_context("spawn"),
@@ -114,29 +121,45 @@ class AlignerPool:
         if self._pool is pool:
             self.restart()
 
-    async def _call(self, pool: Optional[ProcessPoolExecutor], fn, *args):
-        """Run fn in the worker; a lost worker raises AlignerUnavailable."""
-        loop = asyncio.get_running_loop()
+    async def _wait_for_turn(self, warmup: Future) -> bool:
+        """Wait out the warm-up and the calls ahead, then take the turn; False if time runs out."""
+        loaded = asyncio.gather(asyncio.wrap_future(warmup), return_exceptions=True)
         try:
-            return await asyncio.wait_for(
-                loop.run_in_executor(pool, fn, *args), timeout=self.timeout
-            )
+            async with asyncio.timeout(self.timeout):
+                # Shielded so a timeout can't cancel the warm-up through wrap_future.
+                await asyncio.shield(loaded)
+                await self._turn.acquire()
+        except asyncio.TimeoutError:
+            return False
+        return True
+
+    async def _call(self, fn, *args):
+        """Run fn in the worker, with separate timeouts for reaching the call and for running it."""
+        pool, warmup, started_at = self._pool, self._warmup, self._started_at
+        if not await self._wait_for_turn(warmup):
+            if not warmup.done() and time.monotonic() - started_at > self.warmup_timeout:
+                self._restart_if_current(pool)
+                raise AlignerUnavailable(
+                    f"The aligner did not load within {self.warmup_timeout:.0f} s"
+                )
+            raise AlignerBusy(f"The aligner did not reach the call within {self.timeout:.0f} s")
+        try:
+            if self._pool is not pool:
+                raise AlignerUnavailable("The aligner restarted while the call waited")
+            future = pool.submit(fn, *args)
+            return await asyncio.wait_for(asyncio.wrap_future(future), timeout=self.timeout)
+        except asyncio.TimeoutError:
+            self._restart_if_current(pool)
+            raise AlignmentTimeout(f"The call ran longer than {self.timeout:.0f} s")
         except BrokenProcessPool as e:
             self._restart_if_current(pool)
             raise AlignerUnavailable(str(e))
+        finally:
+            self._turn.release()
 
     async def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
-        pool = self._pool
-        try:
-            return await self._call(pool, _align, wav_path, duration, transcript)
-        except asyncio.TimeoutError:
-            self._restart_if_current(pool)
-            raise AlignmentTimeout(f"Alignment exceeded {self.timeout:.0f} s")
+        return await self._call(_align, wav_path, duration, transcript)
 
     async def tokenize(self, texts: list[str]) -> list[Tokenized]:
         """Normalize each text the way an alignment would."""
-        try:
-            return await self._call(self._pool, _tokenize, texts)
-        except asyncio.TimeoutError:
-            # No restart: that would kill a reload or an alignment this call was only waiting on.
-            raise AlignerBusy(f"The aligner did not answer within {self.timeout:.0f} s")
+        return await self._call(_tokenize, texts)

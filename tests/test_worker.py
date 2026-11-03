@@ -16,6 +16,7 @@ from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTi
 
 WAV = Path("unused.wav")
 SPAWN_TIMEOUT = 60.0
+SLOW = 1.5
 
 
 def _no_init(acoustic_dir: Path, dictionary_path: Path) -> None:
@@ -25,6 +26,8 @@ def _no_init(acoustic_dir: Path, dictionary_path: Path) -> None:
 def _fake_align(wav_path: Path, duration: float, transcript: str) -> str:
     if transcript == "hang":
         time.sleep(60)
+    if transcript == "slow":
+        time.sleep(SLOW)
     return transcript
 
 
@@ -43,15 +46,28 @@ class CountingPool(AlignerPool):
 
 
 @pytest.fixture
-def pool(monkeypatch):
+def start_pool(monkeypatch, request):
     monkeypatch.setattr(worker, "_init", _no_init)
     monkeypatch.setattr(worker, "_align", _fake_align)
     monkeypatch.setattr(worker, "_tokenize", _fake_tokenize)
-    pool = CountingPool(timeout=SPAWN_TIMEOUT)
-    pool.start()
+
+    def start(
+        warmup: str = worker.WARMUP_TRANSCRIPT, timeout: float = SPAWN_TIMEOUT, **kwargs
+    ) -> CountingPool:
+        monkeypatch.setattr(worker, "WARMUP_TRANSCRIPT", warmup)
+        pool = CountingPool(timeout=timeout, **kwargs)
+        pool.start()
+        request.addfinalizer(pool.shutdown)
+        return pool
+
+    return start
+
+
+@pytest.fixture
+def pool(start_pool):
+    pool = start_pool()
     pool._warmup.result(timeout=SPAWN_TIMEOUT)
-    yield pool
-    pool.shutdown()
+    return pool
 
 
 def test_calls_queued_on_a_worker_that_dies_restart_it_once(pool):
@@ -89,8 +105,52 @@ def test_calls_queued_behind_a_timeout_fail_without_a_second_restart(pool):
     assert after == "ready"
 
 
-def test_a_lexicon_check_that_times_out_restarts_nothing(pool):
+def test_a_lexicon_check_that_runs_too_long_restarts_the_worker(pool):
     pool.timeout = 0.1
-    with pytest.raises(AlignerBusy):
+    with pytest.raises(AlignmentTimeout):
         asyncio.run(pool.tokenize(["hang"]))
+    assert pool.restarts == 1
+
+
+def test_the_timeout_starts_when_the_worker_picks_up_the_call(pool):
+    async def scenario():
+        pool.timeout = SLOW + 1.0
+        return await asyncio.gather(pool.align(WAV, 0.0, "slow"), pool.align(WAV, 0.0, "slow"))
+
+    assert asyncio.run(scenario()) == ["slow", "slow"]
     assert pool.restarts == 0
+
+
+@pytest.mark.parametrize(
+    "call, ready",
+    [
+        (lambda pool, text: pool.align(WAV, 0.0, text), "ready"),
+        (lambda pool, text: pool.tokenize([text]), ["ready"]),
+    ],
+    ids=["align", "tokenize"],
+)
+def test_a_call_that_gives_up_on_a_reload_never_reaches_the_worker(start_pool, call, ready):
+    pool = start_pool(warmup="slow", timeout=0.5)
+
+    async def scenario():
+        with pytest.raises(AlignerBusy):
+            await call(pool, "hang")
+        await pool.wait_ready()
+        return await call(pool, "ready")
+
+    assert asyncio.run(scenario()) == ready
+    assert pool.restarts == 0
+
+
+def test_a_reload_that_hangs_is_restarted(start_pool):
+    pool = start_pool(warmup="hang", timeout=0.2, warmup_timeout=1.0)
+
+    async def scenario():
+        with pytest.raises(AlignerBusy):
+            await pool.align(WAV, 0.0, "ready")
+        await asyncio.sleep(1.0)
+        with pytest.raises(AlignerUnavailable):
+            await pool.align(WAV, 0.0, "ready")
+
+    asyncio.run(scenario())
+    assert pool.restarts == 1
