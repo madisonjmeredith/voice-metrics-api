@@ -2,8 +2,8 @@
 voice-metrics-api: pitch and resonance scoring for a recording and its transcript.
 
 Flow: upload → ffmpeg → forced alignment (MFA, resident in a worker process)
-→ Praat readings at each phone's midpoint → z-scores against per-phoneme
-population statistics → JSON.
+→ Praat readings at each phone's midpoint (in a pool of worker processes)
+→ z-scores against per-phoneme population statistics → JSON.
 """
 
 import asyncio
@@ -25,9 +25,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
 from app.aligner import Alignment, AlignmentError, EmptyTranscriptError
-from app.analyzer import AudioAnalyzer
+from app.analyzer_pool import AnalyzerPool, AnalyzerUnavailable
 from app.converter import AudioDecodeError, convert_to_wav, get_audio_duration
-from app.measurement import MeasuredPhone, measure_phones
+from app.measurement import MeasuredPhone
 from app.scoring import score
 from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
 
@@ -47,15 +47,22 @@ def create_aligner() -> AlignerPool:
     return AlignerPool()
 
 
+def create_analyzer() -> AnalyzerPool:
+    return AnalyzerPool()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.aligner = create_aligner()
+    app.state.analyzer = create_analyzer()
     app.state.aligner.start()
-    logger.info("Warming up the aligner")
-    await app.state.aligner.wait_ready()
-    logger.info("Aligner ready")
+    app.state.analyzer.start()
+    logger.info("Warming up the aligner and the Praat workers")
+    await asyncio.gather(app.state.aligner.wait_ready(), app.state.analyzer.wait_ready())
+    logger.info("Aligner and Praat workers ready")
     yield
     app.state.aligner.shutdown()
+    app.state.analyzer.shutdown()
 
 
 app = FastAPI(
@@ -105,6 +112,7 @@ ERRORS: dict[type[Exception], ErrorKind] = {
     AlignmentTimeout: ErrorKind(504, "alignment_timeout", True),
     AlignerUnavailable: ErrorKind(503, "aligner_unavailable", True),
     AlignerBusy: ErrorKind(503, "aligner_busy", True),
+    AnalyzerUnavailable: ErrorKind(503, "analyzer_unavailable", True),
 }
 
 FRAMEWORK_ERROR_CODES = {400: "invalid_request", 404: "not_found", 405: "method_not_allowed"}
@@ -212,13 +220,8 @@ async def analyze(
         if duration > MAX_DURATION:
             raise AudioTooLongError(f"Audio too long. Keep it under {MAX_DURATION:.0f} seconds.")
 
-        # The Praat tracks need only the WAV, so they are computed while the
-        # aligner process works.
-        alignment, analyzer = await asyncio.gather(
-            app.state.aligner.align(wav_path, duration, transcript),
-            run_in_threadpool(AudioAnalyzer, wav_path),
-        )
-        phones = measure_phones(analyzer, alignment)
+        alignment = await app.state.aligner.align(wav_path, duration, transcript)
+        phones = await app.state.analyzer.measure(wav_path, alignment)
         aggregates = score(phones)
 
     if aggregates["readings"]["balanced"] < MIN_SCORED_PHONES:
