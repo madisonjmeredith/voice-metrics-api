@@ -15,7 +15,10 @@ from fastapi.testclient import TestClient
 import app.main as main
 from app import __version__
 from app.aligner import Alignment, AlignmentError, EmptyTranscriptError, Tokenized
+import app.analyzer_pool as analyzer_pool
+from app.analyzer_pool import AnalyzerUnavailable
 from app.converter import AudioDecodeError
+from app.measurement import MeasuredPhone
 from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
 from tests.conftest import needs_ffmpeg, post_analyze, vowel_alignment
 
@@ -50,10 +53,32 @@ class FakeAligner:
         return [Tokenized(*self.lexicon.get(text, (text.lower(), []))) for text in texts]
 
 
+class InlineAnalyzer:
+    """Real Praat readings, taken in the test process so no test spawns a worker."""
+
+    def __init__(self, error=None):
+        self.error = error
+
+    def start(self):
+        pass
+
+    async def wait_ready(self):
+        pass
+
+    def shutdown(self):
+        pass
+
+    async def measure(self, wav_path: Path, alignment: Alignment) -> list[MeasuredPhone]:
+        if self.error is not None:
+            raise self.error
+        return analyzer_pool._measure(wav_path, alignment)
+
+
 @pytest.fixture
 def client(monkeypatch):
-    def make(aligner):
+    def make(aligner, analyzer=None):
         monkeypatch.setattr(main, "create_aligner", lambda: aligner)
+        monkeypatch.setattr(main, "create_analyzer", lambda: analyzer or InlineAnalyzer())
         return TestClient(main.app)
 
     return make
@@ -124,6 +149,7 @@ def test_error_codes_are_the_published_contract():
         "AlignmentTimeout": (504, "alignment_timeout", True),
         "AlignerUnavailable": (503, "aligner_unavailable", True),
         "AlignerBusy": (503, "aligner_busy", True),
+        "AnalyzerUnavailable": (503, "analyzer_unavailable", True),
     }
     assert main.FRAMEWORK_ERROR_CODES == {
         400: "invalid_request",
@@ -185,6 +211,15 @@ def test_aligner_failures_map_to_status_and_code(client, vowel_a, error):
 
 
 @needs_ffmpeg
+def test_a_lost_praat_worker_answers_503(client, vowel_a):
+    error = AnalyzerUnavailable("A child process terminated abruptly")
+    with client(FakeAligner(vowel_alignment()), InlineAnalyzer(error=error)) as c:
+        response = post_analyze(c, vowel_a)
+    assert error_of(response) == tuple(main.ERRORS[AnalyzerUnavailable])
+    assert response.json()["detail"] == str(error)
+
+
+@needs_ffmpeg
 def test_too_few_scored_phones(client, silence):
     with client(FakeAligner(vowel_alignment())) as c:
         response = post_analyze(c, silence)
@@ -207,15 +242,15 @@ def test_hiss_is_too_little_voicing(client, hiss):
 
 def voice_only(monkeypatch, count: int) -> None:
     """Keep the pitch reading of the first `count` phones and drop the rest."""
-    measure = main.measure_phones
+    measure = InlineAnalyzer.measure
 
-    def measure_some(analyzer, alignment):
-        phones = measure(analyzer, alignment)
+    async def measure_some(self, wav_path, alignment):
+        phones = await measure(self, wav_path, alignment)
         for phone in phones[count:]:
             phone.F[0] = None
         return phones
 
-    monkeypatch.setattr(main, "measure_phones", measure_some)
+    monkeypatch.setattr(InlineAnalyzer, "measure", measure_some)
 
 
 @needs_ffmpeg
