@@ -138,6 +138,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 | 503 | `aligner_unavailable` | true | The aligner process died or didn't load within `WARMUP_TIMEOUT`, and a new one is starting |
 | 503 | `aligner_busy` | true | The aligner didn't reach the request within `ALIGN_TIMEOUT`, as during a restart. Nothing was restarted |
 | 504 | `alignment_timeout` | true | The request ran longer than `ALIGN_TIMEOUT` once the aligner reached it, so the aligner was restarted |
+| 503 | `analyzer_unavailable` | true | A Praat worker process died and new ones are starting |
 | 404 | `not_found` | true | No route at that path |
 | 405 | `method_not_allowed` | true | The path exists but not for that method |
 
@@ -147,9 +148,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 2. MFA's `english_us_arpa` model aligns the transcript, giving a start and end
    for every word and ARPAbet phone. The model is loaded once, in a dedicated
    worker process, and reused.
-3. Praat (via parselmouth) computes a Pitch object (75–600 Hz) and a Burg
-   Formant object (5 formants, 5000 Hz ceiling) and is read at each phone's
-   midpoint.
+3. After alignment, Praat (via parselmouth) computes a Pitch object (75 to 600 Hz) and a Burg Formant object (5 formants, 5000 Hz ceiling) and reads both at each phone's midpoint. It runs in its own pool of worker processes because parselmouth holds Python's GIL for a whole analysis and would stall every other request until it finished.
 4. Readings more than two standard deviations from the clip mean are dropped
    per formant. Each remaining phone's F1–F3 are z-scored against the
    population statistics for that phoneme, combined with fitted weights, and
@@ -235,9 +234,9 @@ The image is amd64 only: `praat-parselmouth` has no arm64 wheels and MFA's
 Kaldi build is linux-64. On Apple Silicon the build and the container run
 under emulation.
 
-Environment variables: `PORT` (8080), `API_TOKEN` (unset means no auth),
-`ALIGN_TIMEOUT` seconds (10), `WARMUP_TIMEOUT` seconds (60), `MODEL_DIR`
-(/opt/mfa-models).
+Environment variables: `PORT` (8080), `API_TOKEN` (unset means no auth), `ALIGN_TIMEOUT` seconds (10), `WARMUP_TIMEOUT` seconds (60), `ANALYZER_WORKERS` Praat processes (2), `MODEL_DIR` (/opt/mfa-models).
+
+Each Praat process holds about 150 MB. Requests queue for a free one under a burst of long clips, and a host with CPUs to spare can raise `ANALYZER_WORKERS` to get through a burst faster.
 
 ## Tests
 

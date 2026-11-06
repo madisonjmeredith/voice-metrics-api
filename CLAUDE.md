@@ -22,6 +22,7 @@ Source is in `app/`, tests in `tests/`. Non-obvious parts:
 - `dictionary/cmudict.dict` is generated (see below); `dictionary/LICENSE.cmudict` stays beside it; `dictionary/custom.dict` is hand-written and appended last.
 - `tests/textgrids.py` is used only to turn checked-in alignments into fixtures.
 - `tests/test_aligner.py` and `tests/test_worker.py` run without MFA, over stand-ins.
+- `tests/test_analyzer_pool.py` runs without MFA too, over real Praat and a stand-in.
 - `spike/` holds the timing script, the parity-number generator, and `cmudict_gap.py`; not shipped.
 
 ## Decisions that were measured or negotiated, not defaulted
@@ -37,8 +38,7 @@ Kaldi reports fatal errors with `abort()`.
 
 The pool queues its own warm-up alignment on every start, so the model loads
 while the server boots and again while a 503/504 goes out after a restart;
-`/health` reports `warming` until that finishes. The Praat pass runs
-concurrently with alignment because it needs only the WAV.
+`/health` reports `warming` until that finishes.
 
 Each call gets `ALIGN_TIMEOUT` (10 s) twice (#18): once to reach its turn,
 which covers the warm-up and the calls ahead, and once to run. Running out of
@@ -107,6 +107,34 @@ without the flag all 60 got `BrokenProcessPool`. Do not add the flag back.
 worker, and by pointing `WARMUP_TRANSCRIPT` at a slow or hanging stand-in.
 `_turn` binds to the first event loop that waits on it, so a pool can't be contended
 across two `asyncio.run` calls; start a fresh pool per test.
+
+**Praat runs in its own process pool, after alignment (#19).** parselmouth
+holds the GIL for a whole analysis, so in a thread it stalled the event loop,
+finished alignments went uncollected until `ALIGN_TIMEOUT` ran out, and each
+false timeout restarted a healthy aligner. Measured under emulation on
+November 5, 2026, with a 58.8 s clip: in a thread, `/health` took up to 3.5 s
+during one request, and bursts of 3, 4, 6, 12, and 24 such clips each failed
+all or most requests and restarted the aligner. In the pool `/health` peaked
+at 6.5 ms and every request in those bursts succeeded with no restart. Pitch
+and Formant objects can't be pickled (parselmouth 0.4.7), so the alignment
+goes to the worker and the measured phones come back. Praat's binary files
+round-trip the tracks exactly and would have kept Praat overlapping alignment,
+but reading them back would put the API process on the GIL again, and the
+overlap saved only the alignment time: one long clip took 3.6 to 3.7 s either
+way. `tests/test_analyzer_pool.py` pins the property: the event loop's longest
+gap during a 58.8 s pass stays under a quarter of the pass's in-process time
+(natively 6 ms in the pool, 222 ms in a thread). A worker that dies breaks the
+whole executor, so every call on it answers `analyzer_unavailable` and the
+first restarts the pool, the aligner's rule; the aligner is untouched. There
+is no timeout, because Praat's work is bounded by `MAX_DURATION` and hasn't
+been seen to hang. A hung worker would keep its request and its slot until the
+container restarts. `ANALYZER_WORKERS` sets burst throughput: 24 concurrent
+long clips took up to 46.2 s with the default 2 and 28.9 s with 4, under
+emulation with 10 CPUs. It defaults to 2, not the CPU count, because a
+container reports the host's CPUs and each worker holds 125 to 165 MB. Each
+worker runs a Praat pass in its initializer, and one warm-up task per worker
+is what spawns them all at boot; a task alone could land on a worker that was
+already warm and leave another cold (about 0.35 s on its first request).
 
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
@@ -341,6 +369,8 @@ To reproduce a worker loss in a running container (#18), kill the aligner proces
 with `docker exec <container> sh -c 'kill -9 <pid>'`: the image has no `kill` or
 `pkill` binary. Find the pid by grepping each `/proc/<pid>/cmdline` for `spawn_main`,
 skipping the scanning shell's own `$$`, whose command line contains that string too.
+The Praat workers match as well. The aligner is the one with over 1 GB of `VmRSS` in
+`/proc/<pid>/status`; a Praat worker holds about 150 MB.
 
 Speech fixtures come from macOS `say`; see `tests/fixtures/README.md`. Synthetic
 vowels come from formantry's source-filter model in `tests/conftest.py`.
