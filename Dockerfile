@@ -14,10 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p $MODEL_DIR/acoustic $MODEL_DIR/dictionary \
     && curl -fsSL -o /tmp/english_us_arpa.zip \
         https://github.com/MontrealCorpusTools/mfa-models/releases/download/acoustic-english_us_arpa-v3.0.0/english_us_arpa.zip \
+    && echo "d35ce271ded357d833d2f4b8d1041dc3748b9538567ba13f2c697f4e4126711b  /tmp/english_us_arpa.zip" | sha256sum -c - \
     && unzip -q /tmp/english_us_arpa.zip -d $MODEL_DIR/acoustic \
     && rm /tmp/english_us_arpa.zip \
     && curl -fsSL -o $MODEL_DIR/dictionary/english_us_arpa.base.dict \
         https://github.com/MontrealCorpusTools/mfa-models/releases/download/dictionary-english_us_arpa-v3.0.0/english_us_arpa.dict \
+    && echo "e8c6c7b036ae2b7c78d2768b8dc6b1f9359175b842956d00b48c53c9c332e6b0  $MODEL_DIR/dictionary/english_us_arpa.base.dict" | sha256sum -c - \
     && chown -R $MAMBA_USER:$MAMBA_USER $MODEL_DIR
 USER $MAMBA_USER
 
