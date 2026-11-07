@@ -7,6 +7,7 @@ TextGrids) were produced with macOS text-to-speech and MFA; see
 tests/fixtures/README.md.
 """
 
+import logging
 import shutil
 import wave
 from pathlib import Path
@@ -87,6 +88,15 @@ async def noted(call):
     """Await call in a request scope of its own; return its result and the fields it noted."""
     with telemetry.request_scope("-") as fields:
         return await call, fields
+
+
+def pool_lines(caplog, level: int = logging.WARNING) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "app.pool" and r.levelno == level]
+
+
+def kill_workers(pool) -> None:
+    for process in list(pool._pool._processes.values()):
+        process.kill()
 
 
 def post_analyze(client, path: Path, transcript="ah", **query):

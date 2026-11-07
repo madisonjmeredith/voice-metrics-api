@@ -14,13 +14,12 @@ import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
-from typing import Optional
 
 from app.aligner import Alignment
 from app.analyzer import AudioAnalyzer
 from app.measurement import MeasuredPhone, measure_phones
+from app.pool import WARMUP_TIMEOUT, WARMUP_WAV, WarmPool
 from app.telemetry import note, to_ms
-from app.worker import WARMUP_WAV
 
 ANALYZER_WORKERS = int(os.environ.get("ANALYZER_WORKERS", "2"))
 
@@ -44,33 +43,25 @@ def _timed(fn, *args):
     return fn(*args), time.perf_counter() - started
 
 
-class AnalyzerPool:
-    def __init__(self, workers: int = ANALYZER_WORKERS) -> None:
-        self.workers = workers
-        self._pool: Optional[ProcessPoolExecutor] = None
-        self._warmups: list[Future] = []
+class AnalyzerPool(WarmPool):
+    name = "analyzer"
 
-    def start(self) -> None:
-        self._pool = ProcessPoolExecutor(
+    def __init__(
+        self, workers: int = ANALYZER_WORKERS, warmup_timeout: float = WARMUP_TIMEOUT
+    ) -> None:
+        super().__init__(warmup_timeout)
+        self.workers = workers
+
+    def _create_executor(self) -> ProcessPoolExecutor:
+        return ProcessPoolExecutor(
             max_workers=self.workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_warm_up,
         )
+
+    def _submit_warmups(self, pool: ProcessPoolExecutor) -> list[Future]:
         # Workers spawn on demand, so one task per worker is what starts them all at boot.
-        self._warmups = [self._pool.submit(_warm_up) for _ in range(self.workers)]
-
-    async def wait_ready(self) -> None:
-        """Block until the warm-up passes finish; raises if one failed."""
-        await asyncio.gather(*(asyncio.wrap_future(f) for f in self._warmups))
-
-    def restart(self) -> None:
-        self.shutdown()
-        self.start()
-
-    def shutdown(self) -> None:
-        if self._pool is not None:
-            self._pool.shutdown(wait=False)
-            self._pool = None
+        return [pool.submit(_warm_up) for _ in range(self.workers)]
 
     async def measure(self, wav_path: Path, alignment: Alignment) -> list[MeasuredPhone]:
         """Read pitch and F1-F3 at the midpoint of each speech phone."""
@@ -79,8 +70,7 @@ class AnalyzerPool:
         try:
             phones, ran = await asyncio.wrap_future(pool.submit(_timed, _measure, wav_path, alignment))
         except BrokenProcessPool as e:
-            if self._pool is pool:
-                self.restart()
+            self._restart_if_current(pool, "worker_lost")
             raise AnalyzerUnavailable(str(e))
         # Calls queue inside the executor, so only the worker knows when its pass began.
         note(praat_wait_ms=to_ms(time.perf_counter() - started - ran), praat_ms=to_ms(ran))

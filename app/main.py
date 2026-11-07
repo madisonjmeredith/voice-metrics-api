@@ -59,12 +59,13 @@ async def lifespan(app: FastAPI):
     app.state.analyzer = create_analyzer()
     app.state.aligner.start()
     app.state.analyzer.start()
-    logger.info("Warming up the aligner and the Praat workers")
-    await asyncio.gather(app.state.aligner.wait_ready(), app.state.analyzer.wait_ready())
-    logger.info("Aligner and Praat workers ready")
-    yield
-    app.state.aligner.shutdown()
-    app.state.analyzer.shutdown()
+    logger.info("voice-metrics-api %s is loading the aligner and the Praat workers", __version__)
+    try:
+        await asyncio.gather(app.state.aligner.wait_ready(), app.state.analyzer.wait_ready())
+        yield
+    finally:
+        app.state.aligner.shutdown()
+        app.state.analyzer.shutdown()
 
 
 app = FastAPI(

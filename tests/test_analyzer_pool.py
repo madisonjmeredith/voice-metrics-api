@@ -6,6 +6,8 @@ from there.
 """
 
 import asyncio
+import logging
+import re
 import time
 from pathlib import Path
 
@@ -16,7 +18,7 @@ import app.analyzer_pool as analyzer_pool
 from app.analyzer import AudioAnalyzer
 from app.analyzer_pool import NO_PHONES, AnalyzerPool, AnalyzerUnavailable
 from app.measurement import measure_phones
-from tests.conftest import FS, noted, vowel_alignment, write_wav
+from tests.conftest import FS, kill_workers, noted, pool_lines, vowel_alignment, write_wav
 
 HANG = Path("hang.wav")
 SLOW = Path("slow.wav")
@@ -85,7 +87,7 @@ def test_the_event_loop_keeps_running_through_a_praat_pass(start_pool, tmp_path)
     assert asyncio.run(scenario()) < in_process / 4
 
 
-def test_calls_on_a_pool_whose_worker_dies_restart_it_once(start_pool, monkeypatch):
+def test_calls_on_a_pool_whose_worker_dies_restart_it_once(start_pool, monkeypatch, caplog):
     monkeypatch.setattr(analyzer_pool, "_measure", _fake_measure)
     pool = start_pool(workers=2)
 
@@ -102,6 +104,9 @@ def test_calls_on_a_pool_whose_worker_dies_restart_it_once(start_pool, monkeypat
     assert [type(r) for r in results] == [AnalyzerUnavailable] * 4
     assert pool.restarts == 1
     assert after == []
+    [line] = pool_lines(caplog)
+    exited = r"exitcode=(\S+,)?-9(,\S+)?"
+    assert re.fullmatch(rf"analyzer restart reason=worker_lost {exited} uptime_s=\d+\.\d", line)
 
 
 def test_a_pass_reports_its_wait_for_a_worker_apart_from_its_run(start_pool, monkeypatch):
@@ -117,3 +122,12 @@ def test_a_pass_reports_its_wait_for_a_worker_apart_from_its_run(start_pool, mon
     (_, first), (_, second) = asyncio.run(scenario())
     assert first["praat_wait_ms"] < SLOW_PASS * 1000 <= second["praat_wait_ms"]
     assert first["praat_ms"] >= SLOW_PASS * 1000 and second["praat_ms"] >= SLOW_PASS * 1000
+
+
+def test_a_load_is_logged_once_every_worker_is_warm(start_pool, caplog):
+    caplog.set_level(logging.INFO)
+    pool = start_pool(workers=2)
+    asyncio.run(pool.wait_ready())
+
+    [line] = pool_lines(caplog, logging.INFO)
+    assert re.fullmatch(r"analyzer ready load_s=\d+\.\d", line)

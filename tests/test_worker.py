@@ -6,18 +6,22 @@ by name from there.
 """
 
 import asyncio
+import logging
+import re
 import time
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import pytest
 
 import app.worker as worker
 from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
-from tests.conftest import noted
+from tests.conftest import kill_workers, noted, pool_lines
 
 WAV = Path("unused.wav")
 SPAWN_TIMEOUT = 60.0
 SLOW = 1.5
+BRIEF = 0.2
 
 
 def _no_init(acoustic_dir: Path, dictionary_path: Path) -> None:
@@ -25,10 +29,14 @@ def _no_init(acoustic_dir: Path, dictionary_path: Path) -> None:
 
 
 def _fake_align(wav_path: Path, duration: float, transcript: str) -> str:
+    if transcript == "fail":
+        raise RuntimeError("bad dictionary")
     if transcript == "hang":
         time.sleep(60)
     if transcript == "slow":
         time.sleep(SLOW)
+    if transcript == "brief":
+        time.sleep(BRIEF)
     return transcript
 
 
@@ -67,16 +75,15 @@ def start_pool(monkeypatch, request):
 @pytest.fixture
 def pool(start_pool):
     pool = start_pool()
-    pool._warmup.result(timeout=SPAWN_TIMEOUT)
+    pool._warmups[0].result(timeout=SPAWN_TIMEOUT)
     return pool
 
 
-def test_calls_queued_on_a_worker_that_dies_restart_it_once(pool):
+def test_calls_queued_on_a_worker_that_dies_restart_it_once(pool, caplog):
     async def scenario():
         calls = [asyncio.create_task(pool.align(WAV, 0.0, "hang")) for _ in range(4)]
         await asyncio.sleep(0.1)
-        for process in list(pool._pool._processes.values()):
-            process.kill()
+        kill_workers(pool)
         results = await asyncio.gather(*calls, return_exceptions=True)
         return results, await pool.align(WAV, 0.0, "ready")
 
@@ -85,9 +92,11 @@ def test_calls_queued_on_a_worker_that_dies_restart_it_once(pool):
     assert [type(r) for r in results] == [AlignerUnavailable] * 4
     assert pool.restarts == 1
     assert after == "ready"
+    [line] = pool_lines(caplog)
+    assert re.fullmatch(r"aligner restart reason=worker_lost exitcode=-9 uptime_s=\d+\.\d", line)
 
 
-def test_calls_queued_behind_a_timeout_fail_without_a_second_restart(pool):
+def test_calls_queued_behind_a_timeout_fail_without_a_second_restart(pool, caplog):
     async def scenario():
         pool.timeout = 0.5
         hung = asyncio.create_task(pool.align(WAV, 0.0, "hang"))
@@ -104,6 +113,8 @@ def test_calls_queued_behind_a_timeout_fail_without_a_second_restart(pool):
     assert [type(r) for r in results] == [AlignmentTimeout] + [AlignerUnavailable] * 5
     assert pool.restarts == 1
     assert after == "ready"
+    [line] = pool_lines(caplog)
+    assert re.fullmatch(r"aligner restart reason=alignment_timeout uptime_s=\d+\.\d", line)
 
 
 def test_a_lexicon_check_that_runs_too_long_restarts_the_worker(pool):
@@ -148,7 +159,7 @@ def test_a_call_that_gives_up_on_a_reload_never_reaches_the_worker(start_pool, c
     assert pool.restarts == 0
 
 
-def test_a_reload_that_hangs_is_restarted(start_pool):
+def test_a_reload_that_hangs_is_restarted(start_pool, caplog):
     pool = start_pool(warmup="hang", timeout=0.2, warmup_timeout=1.0)
 
     async def scenario():
@@ -160,3 +171,47 @@ def test_a_reload_that_hangs_is_restarted(start_pool):
 
     asyncio.run(scenario())
     assert pool.restarts == 1
+    [line] = pool_lines(caplog)
+    assert line.startswith("aligner restart reason=warmup_timeout uptime_s=")
+    assert pool_lines(caplog, logging.ERROR) == []
+
+
+def test_a_load_is_logged_with_its_time(start_pool, caplog):
+    caplog.set_level(logging.INFO)
+    pool = start_pool(warmup="brief")
+    asyncio.run(pool.wait_ready())
+
+    [line] = pool_lines(caplog, logging.INFO)
+    assert re.fullmatch(r"aligner ready load_s=\d+\.\d", line)
+    assert float(line.split("=")[1]) >= BRIEF
+
+
+def test_a_load_that_fails_is_logged(start_pool, caplog):
+    pool = start_pool(warmup="fail")
+    with pytest.raises(RuntimeError):
+        asyncio.run(pool.wait_ready())
+
+    assert pool_lines(caplog, logging.ERROR) == ["aligner load failed: RuntimeError: bad dictionary"]
+
+
+def test_a_worker_lost_during_the_load_is_logged_with_its_exit_code(start_pool, caplog):
+    pool = start_pool(warmup="hang")
+
+    async def scenario():
+        await asyncio.sleep(0.1)
+        kill_workers(pool)
+        await pool.wait_ready()
+
+    with pytest.raises(BrokenProcessPool):
+        asyncio.run(scenario())
+
+    [line] = pool_lines(caplog, logging.ERROR)
+    assert line.startswith("aligner load failed exitcode=-9: BrokenProcessPool: ")
+
+
+def test_a_load_that_outlasts_the_warm_up_timeout_is_logged(start_pool, caplog):
+    pool = start_pool(warmup="hang", warmup_timeout=0.3)
+    with pytest.raises(TimeoutError):
+        asyncio.run(pool.wait_ready())
+
+    assert pool_lines(caplog, logging.ERROR) == ["aligner did not load within 0.3 s"]

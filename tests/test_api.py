@@ -29,20 +29,23 @@ NAME = "Quillonae"
 class FakeAligner:
     ready = True
 
-    def __init__(self, result=None, error=None, lexicon=None):
+    def __init__(self, result=None, error=None, lexicon=None, load_error=None):
         self.result = result
         self.error = error
         self.lexicon = lexicon or {}
+        self.load_error = load_error
         self.calls = []
+        self.stopped = False
 
     def start(self):
         pass
 
     async def wait_ready(self):
-        pass
+        if self.load_error is not None:
+            raise self.load_error
 
     def shutdown(self):
-        pass
+        self.stopped = True
 
     async def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
         self.calls.append((wav_path.name, duration, transcript))
@@ -61,6 +64,7 @@ class InlineAnalyzer:
 
     def __init__(self, error=None):
         self.error = error
+        self.stopped = False
 
     def start(self):
         pass
@@ -69,7 +73,7 @@ class InlineAnalyzer:
         pass
 
     def shutdown(self):
-        pass
+        self.stopped = True
 
     async def measure(self, wav_path: Path, alignment: Alignment) -> list[MeasuredPhone]:
         if self.error is not None:
@@ -475,3 +479,11 @@ def test_no_log_line_carries_request_content(client, vowel_a, logs):
     assert NAME in str(too_long.json()["detail"]) and word in refused.json()["detail"]
     assert len(request_lines(logs)) == 4
     assert word not in logs.text.lower()
+
+
+def test_a_failed_load_stops_both_pools(client):
+    aligner, analyzer = FakeAligner(load_error=TimeoutError()), InlineAnalyzer()
+    with pytest.raises(TimeoutError):
+        with client(aligner, analyzer):
+            pass
+    assert aligner.stopped and analyzer.stopped
