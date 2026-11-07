@@ -306,3 +306,24 @@ run inside the image's `test` stage:
 docker build --platform linux/amd64 --target test -t voice-metrics-api:test .
 docker run --rm voice-metrics-api:test pytest
 ```
+
+## Updating dependencies
+
+The image installs `env.lock` and `requirements.lock`, not `env.yaml` and `requirements.txt`. You edit the second pair and the locks are generated from them, so a rebuild gets the same conda and pip packages until someone re-solves on purpose.
+
+After editing either input, rewrite the locks:
+
+```sh
+python3 spike/lock.py
+```
+
+It needs Docker and takes about 30 seconds. It solves the inputs in the Dockerfile's base image. It re-solves `env.lock` only when `env.yaml` has changed, which keeps a `requirements.txt` edit from moving any conda package. To pick up newer conda packages without changing `env.yaml`, delete `env.lock` first.
+
+`.venv/bin/pytest` fails when an input has changed and its lock hasn't. The `.venv` itself installs `requirements.txt` without the lock because the lock is for the image's Linux build.
+
+Then build the `test` stage and run the suite in it, as in [Tests](#tests). Read the `env.lock` diff before merging because a new version of any of these can change the figures for the same recording:
+
+- `ffmpeg`, which decodes the upload
+- `praat-parselmouth`, which takes the pitch and formant readings
+- `kaldi`, `kalpy`, and `montreal-forced-aligner`, which do the alignment
+- `libblas`, `liblapack`, and `libopenblas`, which Kaldi's matrix code calls

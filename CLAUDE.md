@@ -22,10 +22,11 @@ Source is in `app/`, tests in `tests/`. Non-obvious parts:
 - `app/pool.py` holds what both worker pools share (`WarmPool`): warm-up, restart, their log lines, and the probes' `state`.
 - `app/telemetry.py` is imported by the worker processes, so it stays standard library only; the Starlette middleware is in `app/request_log.py`.
 - `dictionary/cmudict.dict` is generated (see below); `dictionary/LICENSE.cmudict` stays beside it; `dictionary/custom.dict` is hand-written and appended last.
+- `env.lock` and `requirements.lock` are generated from `env.yaml` and `requirements.txt` (see below); edit the inputs, never the locks.
 - `tests/textgrids.py` is used only to turn checked-in alignments into fixtures.
 - `tests/test_aligner.py` and `tests/test_worker.py` run without MFA, over stand-ins.
 - `tests/test_analyzer_pool.py` runs without MFA too, over real Praat and a stand-in.
-- `spike/` holds the timing script, the parity-number generator, and `cmudict_gap.py`; not shipped.
+- `spike/` holds scripts that aren't shipped: the timing script and the generators for the parity numbers, `cmudict.dict`, and the lockfiles.
 
 ## Decisions that were measured or negotiated, not defaulted
 
@@ -369,6 +370,35 @@ unpacks per request. The dictionary asset lands as
 That layer is first in the Dockerfile because it depends on nothing else, so
 it survives every dependency change.
 
+**The build is locked (#22).** The shipped stage installs only `env.lock` and
+`requirements.lock`, which `spike/lock.py` writes by solving `env.yaml` and
+`requirements.txt` in the Dockerfile's base image (about 30 s). Rerun it after
+editing an input, and only then: every package the inputs leave unpinned can
+move. It re-solves `env.lock` only when `env.yaml` has changed since the lock
+was written, so a `requirements.txt` edit can't move a conda package; delete
+`env.lock` to force a conda re-solve. `requirements.lock` is re-solved every
+run because pip resolves against the conda environment. Measured on November 7,
+2026, a solve a few hours after that morning's build differed from it in 18 of
+287 conda packages, the BLAS/LAPACK metapackage builds among them (libopenblas
+itself stayed at 0.3.34), and pip picked FastAPI 0.162.2 and Pydantic 2.14.3
+over the image's 0.162.0 and 2.14.2. `requirements.lock` holds only what pip
+installs over the conda environment, read from `pip install --dry-run --report`
+after the conda install, so pip never replaces a conda package.
+`--require-hashes` turns a dependency missing from it into a failed build
+instead of an unpinned download. Don't add `pip check` to the build: it already
+fails on MFA's `seaborn` requirement, which the conda package doesn't install.
+micromamba checks each package's md5 from the explicit lock (a wrong one aborts
+the install). Each lock's first line carries the sha256 of its input, and
+`tests/test_lock.py` fails when it no longer matches; the `test` stage copies
+the inputs and locks so CI runs that check. The base image is pinned by its
+index digest and the two model assets by sha256. GitHub's API has no digest for
+those 2024 assets, so their hashes were computed from the downloads. The apt
+packages (`ca-certificates`, `curl`, `unzip`) stay unpinned because they only
+fetch and unpack files whose checksums are checked. `requirements-dev.txt`
+stays unlocked because it only adds pytest, httpx, and their dependencies to
+the `test` stage, which doesn't ship. The local `.venv` installs
+`requirements.txt` unlocked, so it can run a newer FastAPI than the image.
+
 ## Response compatibility
 
 The client reads `pitch.{mean,median,stdev,min,max}`,
@@ -391,12 +421,12 @@ don't bump it before then unless asked. At launch it becomes 1.0.0, and from
 then on the PR that makes a change also bumps it: major for a breaking change
 to the response or error contract, minor for a new field, endpoint, or code or
 for anything that can move a figure or a refusal for the same recording and
-transcript (a dictionary-only change included), patch for anything a caller
-can't observe. From 1.0.0, tag each bump `vX.Y.Z` on the merged commit on
-main. Don't tag a 0.x version: every commit until the next bump reports it,
-so the tag would mark only the first of them. Nothing bumps or checks the
-version automatically: whether a change can move a score is a judgment call,
-and the suite runs in an image without `.git`.
+transcript (a dictionary-only change or a re-solved `env.lock` included),
+patch for anything a caller can't observe. From 1.0.0, tag each bump `vX.Y.Z`
+on the merged commit on main. Don't tag a 0.x version: every commit until the
+next bump reports it, so the tag would mark only the first of them. Nothing
+bumps or checks the version automatically: whether a change can move a score
+is a judgment call, and the suite runs in an image without `.git`.
 
 `/health` and `/ready` return `{version, status, aligner, analyzer}` at 200
 and 503. A probe's 503 is an answer, not an error, so it doesn't take the
@@ -463,6 +493,7 @@ vowels come from formantry's source-filter model in `tests/conftest.py`.
 ## Building
 
 ```sh
+python3 spike/lock.py   # after editing env.yaml or requirements.txt
 docker buildx build --platform linux/amd64 --load -t voice-metrics-api .
 ```
 
