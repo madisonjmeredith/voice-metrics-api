@@ -19,6 +19,8 @@ Source is in `app/`, tests in `tests/`. Non-obvious parts:
 
 - `app/reference/` is copied verbatim from the reference project; don't edit it.
 - `app/warmup.wav` is aligned at startup so the model loads before traffic.
+- `app/pool.py` holds what both worker pools share (`WarmPool`): warm-up, restart, their log lines, and the probes' `state`.
+- `app/telemetry.py` is imported by the worker processes, so it stays standard library only; the Starlette middleware is in `app/request_log.py`.
 - `dictionary/cmudict.dict` is generated (see below); `dictionary/LICENSE.cmudict` stays beside it; `dictionary/custom.dict` is hand-written and appended last.
 - `tests/textgrids.py` is used only to turn checked-in alignments into fixtures.
 - `tests/test_aligner.py` and `tests/test_worker.py` run without MFA, over stand-ins.
@@ -38,7 +40,7 @@ Kaldi reports fatal errors with `abort()`.
 
 The pool queues its own warm-up alignment on every start, so the model loads
 while the server boots and again while a 503/504 goes out after a restart;
-`/health` reports `warming` until that finishes.
+both probes report `warming` until that finishes.
 
 Each call gets `ALIGN_TIMEOUT` (10 s) twice (#18): once to reach its turn,
 which covers the warm-up and the calls ahead, and once to run. Running out of
@@ -53,7 +55,8 @@ timeout. A reload still running after `WARMUP_TIMEOUT` (60 s, about five
 times the emulated reload) is restarted by the next call that gives up on it,
 which answers `aligner_unavailable`; that keeps the self-healing a hung
 reload got from any timeout before. The load has not been measured on native
-amd64.
+amd64; the aligner's `ready` log line carries `load_s`, so the first native run
+will show it.
 
 **The lexicon check runs in the aligner process.**
 `POST /lexicon` calls `LoadedAligner.tokenize` through the pool, so its answer
@@ -135,6 +138,52 @@ container reports the host's CPUs and each worker holds 125 to 165 MB. Each
 worker runs a Praat pass in its initializer, and one warm-up task per worker
 is what spawns them all at boot; a task alone could land on a worker that was
 already warm and leave another cold (about 0.35 s on its first request).
+
+**`/health` is liveness and `/ready` is readiness (#20).** `/health` used to be
+200 whatever the aligner did: in #18's outage 61 of 68 samples said `warming`
+with a 200 while every `/analyze` failed. It now answers 503 only when a pool
+is `stalled` (loading past `WARMUP_TIMEOUT`) or `down` (a failed load or a dead
+worker), the states a pool leaves only when a call arrives and restarts it, so
+a router that stopped sending traffic would leave it there. `warming` stays 200
+so a normal reload can't get an instance replaced. The bound reuses
+`WARMUP_TIMEOUT` because a call already restarts a reload past it, and
+`_load_overdue` is the one check behind both: `/health` must never call a pool
+stalled that no call would restart. `PoolState.live` holds that rule. A worker
+that dies while idle breaks its executor within half a second, so `state` sees
+it with no traffic. Nothing restarts it from inside the service, deliberately:
+liveness hands it to the platform, whose restart backoff handles a crash loop
+better than a loop in-process would. A boot whose load outlasts
+`WARMUP_TIMEOUT` logs which pool didn't load and exits (uvicorn's code 3); both
+pools' `shutdown()` kill their workers so a hung one can't keep the process
+alive. On a single instance, a router that honors `/ready` turns a request
+that would have waited out a reload into a router 503; the README says so.
+
+**Logs carry no request content (#20).** A transcript can include someone's
+first name, so no line has the transcript or its words, OOV words (only their
+count), the upload's filename, an error's `detail` (ffmpeg's stderr, kalpy's
+message, validation input), or the client IP; the `code` names the error.
+`test_no_log_line_carries_request_content` sends a name through each path. The
+one gap: an unhandled exception's traceback, which uvicorn logs, carries that
+exception's message. `configure_logging` sends uvicorn's own loggers through
+the app's handler and disables `uvicorn.access`, because the request line
+replaces it and a probe every few seconds would flood it; doing that in code
+instead of a CMD flag keeps a local `uvicorn` run from logging each request
+twice. Probes are logged only when they answer 503. The request ID reaches pool
+lines through a contextvar and a record factory; lines from an executor's
+thread (load results) show `-`. Starlette sends an unhandled 500 from its
+outermost middleware, past `RequestLog`, so that response has no
+`X-Request-ID`; its line names the exception class instead.
+
+**Exit codes are read without racing the executor (#20).** When a worker dies,
+the executor's manager thread reaps it while terminating the pool, and a
+`Process.exitcode` read in between gets ECHILD from `waitpid` and returns None.
+In the image that dropped the exit code from the analyzer's restart line.
+`_dead_workers` uses the process sentinel, which doesn't reap, and `_exit_code`
+waits up to 0.1 s for the manager thread to store the code. `is_alive()` and
+`join()` hit the same ECHILD, so don't swap either in. `shutdown()` clears
+`_pool` before killing anything so a warm-up the service kills on purpose (a
+`warmup_timeout` restart) isn't logged as a failed load. The Praat pool's line
+can list `-15` for the siblings the executor stops itself.
 
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
@@ -313,7 +362,7 @@ keeps. The balanced readings are a subset of the other resonance figures'.
 `/lexicon` returns `words[].{word,normalized,oovs,in_vocabulary}`. Nothing
 reads it yet; treat it the same way once something does.
 
-`/analyze`, `/lexicon`, `/health`, and `/` carry a top-level `version`, read
+`/analyze`, `/lexicon`, `/health`, `/ready`, and `/` carry a top-level `version`, read
 from `app.__version__` like the OpenAPI schema's (#16). Error bodies don't
 carry it. It is bumped by hand, not stamped from the commit at build time,
 because neither this service nor the client is live and a version that moves
@@ -328,6 +377,10 @@ main. Don't tag a 0.x version: every commit until the next bump reports it,
 so the tag would mark only the first of them. Nothing bumps or checks the
 version automatically: whether a change can move a score is a judgment call,
 and the suite runs in an image without `.git`.
+
+`/health` and `/ready` return `{version, status, aligner, analyzer}` at 200
+and 503. A probe's 503 is an answer, not an error, so it doesn't take the
+error shape below. The client calls neither.
 
 Every error body is `{detail, code, retryable}`, built from `ERRORS` and
 `FRAMEWORK_ERROR_CODES` in `app/main.py` (#1). Callers branch on `code` and
@@ -349,7 +402,7 @@ image.
 ```sh
 .venv/bin/pytest            # unit tests, ~10 s; integration tests skip without MFA
 docker buildx build --platform linux/amd64 --target test --load -t voice-metrics-api:test .
-docker run --rm voice-metrics-api:test pytest -q -rs     # everything, including MFA
+docker run --rm voice-metrics-api:test pytest -rs     # everything, including MFA
 ```
 
 The `test` stage adds pytest and the test tree on top of the shipped image;
@@ -370,7 +423,16 @@ with `docker exec <container> sh -c 'kill -9 <pid>'`: the image has no `kill` or
 `pkill` binary. Find the pid by grepping each `/proc/<pid>/cmdline` for `spawn_main`,
 skipping the scanning shell's own `$$`, whose command line contains that string too.
 The Praat workers match as well. The aligner is the one with over 1 GB of `VmRSS` in
-`/proc/<pid>/status`; a Praat worker holds about 150 MB.
+`/proc/<pid>/status`; a Praat worker holds about 150 MB. The restart line in
+`docker logs` carries the exit code. To reproduce a hung reload (#20), restart
+the aligner and `kill -STOP` the new process: `/health` reads `stalled` once
+`WARMUP_TIMEOUT` has passed since the restart, and the next call restarts it
+with `reason=warmup_timeout`.
+
+`pytest.ini` already passes `-q`, so adding another hides the summary line.
+A stand-in from a test module makes a spawned worker import that module
+(pytest, numpy) on its first call, about 1 s under emulation and before the
+stand-in's own timing starts, so warm the worker before timing anything.
 
 Speech fixtures come from macOS `say`; see `tests/fixtures/README.md`. Synthetic
 vowels come from formantry's source-filter model in `tests/conftest.py`.

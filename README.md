@@ -91,14 +91,33 @@ The check runs in the aligner's worker process. It waits behind an alignment tha
 
 It can answer with `unauthorized`, `invalid_request`, `aligner_unavailable`, `aligner_busy`, or `alignment_timeout` from [Errors](#errors).
 
-### `GET /health`
+### `GET /health` and `GET /ready`
 
-`{"version": "0.1.0", "status": "healthy", "aligner": "ready"}`. The aligner reports `warming`
-while its model loads after startup or a restart.
+These are for a platform's health checks. Both return the same body at 200 and at 503:
+
+```json
+{ "version": "0.1.0", "status": "healthy", "aligner": "ready", "analyzer": "ready" }
+```
+
+`aligner` and `analyzer` each report one of four states:
+
+| State | Meaning |
+| --- | --- |
+| `ready` | Loaded and taking requests |
+| `warming` | Loading after a restart, for up to `WARMUP_TIMEOUT` |
+| `stalled` | Still loading after `WARMUP_TIMEOUT` |
+| `down` | The load failed or a worker process died |
+
+- `/health` is the liveness check. It answers 503 (`"status": "unhealthy"`) only while a pool is `stalled` or `down`. A pool leaves those states only when a request arrives and restarts it, so an instance that a router has stopped sending traffic to would stay stuck. A normal reload stays 200 so the check doesn't get an instance replaced in the middle of one.
+- `/ready` is the readiness check. It answers 200 (`"status": "ready"`) only when both pools are `ready` and 503 (`"not_ready"`) otherwise.
+
+The server doesn't accept connections until both pools have loaded at startup, about 10 seconds under emulation. If the load is still running after `WARMUP_TIMEOUT`, the server logs which pool didn't load and exits with code 3. Give the platform's startup check at least `WARMUP_TIMEOUT` before it gives up.
+
+On a single instance, point only the liveness check at the service. A router that follows `/ready` sends nothing during a reload, so requests that would have waited it out fail at the router instead.
 
 ### Versioning
 
-`/analyze`, `/lexicon`, `/health`, and `/` all return a top-level `version`. The OpenAPI schema at `/openapi.json` has the same one. It's a `MAJOR.MINOR.PATCH` number set by hand in `app/__init__.py` and doesn't change with every commit.
+`/analyze`, `/lexicon`, `/health`, `/ready`, and `/` all return a top-level `version`. The OpenAPI schema at `/openapi.json` has the same one. It's a `MAJOR.MINOR.PATCH` number set by hand in `app/__init__.py` and doesn't change with every commit.
 
 The service stays in 0.x until it goes into production. Until then the version makes no promises and changes only when someone bumps it on purpose. Two results with the same 0.x version can still have been scored differently.
 
@@ -238,6 +257,39 @@ Environment variables: `PORT` (8080), `API_TOKEN` (unset means no auth), `ALIGN_
 
 Each Praat process holds about 150 MB. Requests queue for a free one under a burst of long clips, and a host with CPUs to spare can raise `ANALYZER_WORKERS` to get through a burst faster.
 
+## Logs
+
+The service writes to stderr: one line per request, and a line whenever the aligner or the Praat workers restart, finish loading, or fail to load. These came from a container whose aligner was killed while idle:
+
+```text
+2026-11-07 18:26:17,099 INFO request=job-41 POST /analyze 200 total_ms=199 decode_ms=101 audio_s=1.3 aligner_wait_ms=0 aligner_ms=5 words=2 oovs=1 praat_wait_ms=1 praat_ms=69
+2026-11-07 18:26:31,781 WARNING request=f7b8268c8a0bb70d GET /health 503 total_ms=1 aligner=down analyzer=ready
+2026-11-07 18:26:31,966 WARNING request=289cb16d8cdb9ea6 aligner restart reason=worker_lost exitcode=-9 uptime_s=40.5
+2026-11-07 18:26:31,970 WARNING request=289cb16d8cdb9ea6 POST /analyze 503 code=aligner_unavailable total_ms=161 decode_ms=154 audio_s=1.3 aligner_wait_ms=0
+2026-11-07 18:26:41,873 INFO request=- aligner ready load_s=9.9
+```
+
+Every line carries `request=` with the ID of the request it came from, or `-` when it didn't come from one. Send an `X-Request-ID` header of 1 to 64 letters, digits, dots, underscores, or hyphens and the service uses yours. Otherwise it generates one. Either way it comes back in the response's `X-Request-ID` header.
+
+A request line has the status, the error `code` if there was one, and the time each stage took in milliseconds:
+
+- `decode_ms`: saving the upload and running ffmpeg
+- `aligner_wait_ms`: waiting out a reload and the calls ahead
+- `aligner_ms`: the alignment, or the `/lexicon` check
+- `praat_wait_ms`: waiting for a free Praat worker
+- `praat_ms`: the Praat pass
+
+A `praat_wait_ms` that keeps growing under load means `ANALYZER_WORKERS` is too low. An unhandled exception adds `error=` with the exception's class. `/health` and `/ready` stay out of the log unless they answer 503.
+
+A restart line names its `reason` (`alignment_timeout`, `worker_lost`, or `warmup_timeout`) and the `exitcode` of any worker that died:
+
+- `-6`: the process aborted, which is how Kaldi reports a fatal error
+- `-9`: the process was killed, as by the out-of-memory killer
+- `-11`: a segfault, as from a dictionary phone the acoustic model lacks (see [Adding a word](#adding-a-word))
+- `-15`: the pool stopped the process itself after another Praat worker died
+
+No line includes the transcript or its words, out-of-vocabulary words (only their count), the upload's filename, an error's `detail`, or the client's IP, because a transcript can include someone's name. Uvicorn's access log is off since the request line replaces it.
+
 ## Tests
 
 ```sh
@@ -250,5 +302,5 @@ run inside the image's `test` stage:
 
 ```sh
 docker build --platform linux/amd64 --target test -t voice-metrics-api:test .
-docker run --rm voice-metrics-api:test pytest -q
+docker run --rm voice-metrics-api:test pytest
 ```
