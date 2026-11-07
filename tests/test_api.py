@@ -6,6 +6,7 @@ enough to exercise validation, the response shape and the error mapping
 without a conda environment.
 """
 
+import logging
 import re
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from app.converter import AudioDecodeError
 from app.measurement import MeasuredPhone
 from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
 from tests.conftest import needs_ffmpeg, post_analyze, vowel_alignment
+
+NAME = "Quillonae"
 
 
 class FakeAligner:
@@ -76,12 +79,22 @@ class InlineAnalyzer:
 
 @pytest.fixture
 def client(monkeypatch):
-    def make(aligner, analyzer=None):
+    def make(aligner, analyzer=None, **kwargs):
         monkeypatch.setattr(main, "create_aligner", lambda: aligner)
         monkeypatch.setattr(main, "create_analyzer", lambda: analyzer or InlineAnalyzer())
-        return TestClient(main.app)
+        return TestClient(main.app, **kwargs)
 
     return make
+
+
+@pytest.fixture
+def logs(caplog):
+    caplog.set_level(logging.INFO)
+    return caplog
+
+
+def request_lines(logs) -> list[logging.LogRecord]:
+    return [record for record in logs.records if record.name == "app.request"]
 
 
 @needs_ffmpeg
@@ -374,3 +387,91 @@ def test_lexicon_needs_the_bearer_token_when_configured(client, monkeypatch):
         allowed = c.post("/lexicon", json={"words": ["hello"]})
     assert error_of(denied) == tuple(main.ERRORS[main.InvalidTokenError])
     assert allowed.status_code == 200
+
+
+@needs_ffmpeg
+def test_a_request_logs_one_line_with_its_stages(client, vowel_a, logs):
+    with client(FakeAligner(vowel_alignment())) as c:
+        response = post_analyze(c, vowel_a)
+
+    [line] = request_lines(logs)
+    assert line.levelno == logging.INFO
+    assert line.request_id == response.headers["x-request-id"]
+    method, path, status, *fields = line.getMessage().split()
+    assert (method, path, status) == ("POST", "/analyze", "200")
+    assert [field.split("=")[0] for field in fields[:2]] == ["total_ms", "decode_ms"]
+    assert fields[2:] == ["audio_s=1.5", "words=1", "oovs=0"]
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    "error, level",
+    [(AlignmentError("beam too narrow"), logging.INFO), (AlignmentTimeout("ran long"), logging.WARNING)],
+    ids=["verdict", "retryable"],
+)
+def test_an_error_line_carries_its_code(client, vowel_a, logs, error, level):
+    with client(FakeAligner(error=error)) as c:
+        response = post_analyze(c, vowel_a)
+
+    status, code, _ = error_of(response)
+    [line] = request_lines(logs)
+    assert line.levelno == level
+    assert line.getMessage().startswith(f"POST /analyze {status} code={code} total_ms=")
+
+
+@needs_ffmpeg
+def test_an_unhandled_exception_logs_a_500(client, vowel_a, logs):
+    with client(FakeAligner(error=RuntimeError("boom")), raise_server_exceptions=False) as c:
+        response = post_analyze(c, vowel_a)
+
+    assert response.status_code == 500
+    [line] = request_lines(logs)
+    assert line.levelno == logging.ERROR
+    assert line.getMessage().startswith("POST /analyze 500 error=RuntimeError total_ms=")
+
+
+def test_probes_are_left_out_of_the_request_log(client, logs):
+    with client(FakeAligner()) as c:
+        c.get("/health")
+        c.get("/")
+    assert [line.getMessage().split()[:3] for line in request_lines(logs)] == [["GET", "/", "200"]]
+
+
+@pytest.mark.parametrize(
+    "sent, kept",
+    [("job-41.a_b", True), ("has space", False), ("x" * 65, False), (None, False)],
+    ids=["safe", "unsafe", "too long", "absent"],
+)
+def test_a_caller_request_id_is_kept_when_it_is_safe(client, logs, sent, kept):
+    headers = {} if sent is None else {"X-Request-ID": sent}
+    with client(FakeAligner()) as c:
+        response = c.post("/lexicon", json={"words": ["hello"]}, headers=headers)
+
+    returned = response.headers["x-request-id"]
+    assert (returned == sent) is kept
+    if not kept:
+        assert re.fullmatch(r"[0-9a-f]{16}", returned)
+    [line] = request_lines(logs)
+    assert line.request_id == returned
+
+
+@needs_ffmpeg
+def test_no_log_line_carries_request_content(client, vowel_a, logs):
+    word = NAME.lower()
+    aligner = FakeAligner(vowel_alignment(oovs=[word]), lexicon={NAME: (word, [word])})
+    with client(aligner) as c:
+        with open(vowel_a, "rb") as f:
+            scored = c.post(
+                "/analyze",
+                files={"audio": (f"{NAME}.wav", f, "audio/wav")},
+                data={"transcript": f"Hello, {NAME}."},
+            )
+        checked = c.post("/lexicon", json={"words": [NAME]})
+        too_long = c.post("/lexicon", json={"words": [NAME * 40]})
+    with client(FakeAligner(error=AlignmentError(f"could not align {word}"))) as c:
+        refused = post_analyze(c, vowel_a, transcript=NAME)
+
+    assert [r.status_code for r in (scored, checked, too_long, refused)] == [200, 200, 422, 422]
+    assert NAME in str(too_long.json()["detail"]) and word in refused.json()["detail"]
+    assert len(request_lines(logs)) == 4
+    assert word not in logs.text.lower()

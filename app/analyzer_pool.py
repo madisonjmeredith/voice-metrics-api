@@ -10,6 +10,7 @@ worker and the measured phones come back.
 import asyncio
 import multiprocessing
 import os
+import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Optional
 from app.aligner import Alignment
 from app.analyzer import AudioAnalyzer
 from app.measurement import MeasuredPhone, measure_phones
+from app.telemetry import note, to_ms
 from app.worker import WARMUP_WAV
 
 ANALYZER_WORKERS = int(os.environ.get("ANALYZER_WORKERS", "2"))
@@ -35,6 +37,11 @@ def _warm_up() -> None:
 
 def _measure(wav_path: Path, alignment: Alignment) -> list[MeasuredPhone]:
     return measure_phones(AudioAnalyzer(wav_path), alignment)
+
+
+def _timed(fn, *args):
+    started = time.perf_counter()
+    return fn(*args), time.perf_counter() - started
 
 
 class AnalyzerPool:
@@ -68,9 +75,13 @@ class AnalyzerPool:
     async def measure(self, wav_path: Path, alignment: Alignment) -> list[MeasuredPhone]:
         """Read pitch and F1-F3 at the midpoint of each speech phone."""
         pool = self._pool
+        started = time.perf_counter()
         try:
-            return await asyncio.wrap_future(pool.submit(_measure, wav_path, alignment))
+            phones, ran = await asyncio.wrap_future(pool.submit(_timed, _measure, wav_path, alignment))
         except BrokenProcessPool as e:
             if self._pool is pool:
                 self.restart()
             raise AnalyzerUnavailable(str(e))
+        # Calls queue inside the executor, so only the worker knows when its pass began.
+        note(praat_wait_ms=to_ms(time.perf_counter() - started - ran), praat_ms=to_ms(ran))
+        return phones

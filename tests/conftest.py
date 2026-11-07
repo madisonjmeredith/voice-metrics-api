@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from app import telemetry
 from app.aligner import Alignment, LoadedAligner, PhoneSpan, WordSpan
 from app.worker import ACOUSTIC_DIR, DICTIONARY_PATH
 
@@ -80,6 +81,12 @@ def vowel_alignment(labels=("AA1", "AH0", "AA1", "AH0"), oovs=()) -> Alignment:
         phones.append(PhoneSpan(label, start, start + step, 1))
     phones.append(PhoneSpan("sil", 1.4, 1.5))
     return Alignment(words=words, phones=phones, oovs=list(oovs))
+
+
+async def noted(call):
+    """Await call in a request scope of its own; return its result and the fields it noted."""
+    with telemetry.request_scope("-") as fields:
+        return await call, fields
 
 
 def post_analyze(client, path: Path, transcript="ah", **query):

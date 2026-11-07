@@ -13,6 +13,7 @@ import pytest
 
 import app.worker as worker
 from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
+from tests.conftest import noted
 
 WAV = Path("unused.wav")
 SPAWN_TIMEOUT = 60.0
@@ -115,10 +116,15 @@ def test_a_lexicon_check_that_runs_too_long_restarts_the_worker(pool):
 def test_the_timeout_starts_when_the_worker_picks_up_the_call(pool):
     async def scenario():
         pool.timeout = SLOW + 1.0
-        return await asyncio.gather(pool.align(WAV, 0.0, "slow"), pool.align(WAV, 0.0, "slow"))
+        return await asyncio.gather(
+            noted(pool.align(WAV, 0.0, "slow")), noted(pool.align(WAV, 0.0, "slow"))
+        )
 
-    assert asyncio.run(scenario()) == ["slow", "slow"]
+    (first, waited_less), (second, waited_more) = asyncio.run(scenario())
+    assert [first, second] == ["slow", "slow"]
     assert pool.restarts == 0
+    assert waited_less["aligner_wait_ms"] < SLOW * 1000 <= waited_more["aligner_wait_ms"]
+    assert waited_less["aligner_ms"] >= SLOW * 1000 and waited_more["aligner_ms"] >= SLOW * 1000
 
 
 @pytest.mark.parametrize(

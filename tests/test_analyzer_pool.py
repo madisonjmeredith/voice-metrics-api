@@ -16,15 +16,19 @@ import app.analyzer_pool as analyzer_pool
 from app.analyzer import AudioAnalyzer
 from app.analyzer_pool import NO_PHONES, AnalyzerPool, AnalyzerUnavailable
 from app.measurement import measure_phones
-from tests.conftest import FS, vowel_alignment, write_wav
+from tests.conftest import FS, noted, vowel_alignment, write_wav
 
 HANG = Path("hang.wav")
+SLOW = Path("slow.wav")
 READY = Path("ready.wav")
+SLOW_PASS = 1.0
 
 
 def _fake_measure(wav_path: Path, alignment) -> list:
     if wav_path == HANG:
         time.sleep(60)
+    if wav_path == SLOW:
+        time.sleep(SLOW_PASS)
     return []
 
 
@@ -98,3 +102,18 @@ def test_calls_on_a_pool_whose_worker_dies_restart_it_once(start_pool, monkeypat
     assert [type(r) for r in results] == [AnalyzerUnavailable] * 4
     assert pool.restarts == 1
     assert after == []
+
+
+def test_a_pass_reports_its_wait_for_a_worker_apart_from_its_run(start_pool, monkeypatch):
+    monkeypatch.setattr(analyzer_pool, "_measure", _fake_measure)
+    pool = start_pool(workers=1)
+
+    async def scenario():
+        await pool.wait_ready()
+        return await asyncio.gather(
+            noted(pool.measure(SLOW, NO_PHONES)), noted(pool.measure(SLOW, NO_PHONES))
+        )
+
+    (_, first), (_, second) = asyncio.run(scenario())
+    assert first["praat_wait_ms"] < SLOW_PASS * 1000 <= second["praat_wait_ms"]
+    assert first["praat_ms"] >= SLOW_PASS * 1000 and second["praat_ms"] >= SLOW_PASS * 1000

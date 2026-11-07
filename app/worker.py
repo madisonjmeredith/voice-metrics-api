@@ -23,6 +23,7 @@ from typing import Optional
 
 from app.aligner import Alignment, LoadedAligner, Tokenized
 from app.converter import get_audio_duration
+from app.telemetry import timed
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/opt/mfa-models"))
 ACOUSTIC_DIR = MODEL_DIR / "acoustic" / "english_us_arpa"
@@ -136,7 +137,9 @@ class AlignerPool:
     async def _call(self, fn, *args):
         """Run fn in the worker, with separate timeouts for reaching the call and for running it."""
         pool, warmup, started_at = self._pool, self._warmup, self._started_at
-        if not await self._wait_for_turn(warmup):
+        with timed("aligner_wait"):
+            reached = await self._wait_for_turn(warmup)
+        if not reached:
             if not warmup.done() and time.monotonic() - started_at > self.warmup_timeout:
                 self._restart_if_current(pool)
                 raise AlignerUnavailable(
@@ -147,7 +150,8 @@ class AlignerPool:
             if self._pool is not pool:
                 raise AlignerUnavailable("The aligner restarted while the call waited")
             future = pool.submit(fn, *args)
-            return await asyncio.wait_for(asyncio.wrap_future(future), timeout=self.timeout)
+            with timed("aligner"):
+                return await asyncio.wait_for(asyncio.wrap_future(future), timeout=self.timeout)
         except asyncio.TimeoutError:
             self._restart_if_current(pool)
             raise AlignmentTimeout(f"The call ran longer than {self.timeout:.0f} s")

@@ -29,9 +29,11 @@ from app.analyzer_pool import AnalyzerPool, AnalyzerUnavailable
 from app.converter import AudioDecodeError, convert_to_wav, get_audio_duration
 from app.measurement import MeasuredPhone
 from app.scoring import score
+from app.request_log import RequestLog
+from app.telemetry import configure_logging, note, timed
 from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+configure_logging()
 logger = logging.getLogger(__name__)
 
 MIN_DURATION = 1.0
@@ -71,6 +73,7 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+app.add_middleware(RequestLog, quiet=frozenset({"/health"}))
 
 
 class InvalidTokenError(Exception):
@@ -119,6 +122,7 @@ FRAMEWORK_ERROR_CODES = {400: "invalid_request", 404: "not_found", 405: "method_
 
 
 def _error_response(status: int, detail, code: str, retryable: bool, headers=None) -> JSONResponse:
+    note(code=code)
     return JSONResponse(
         status_code=status,
         content={"detail": detail, "code": code, "retryable": retryable},
@@ -214,13 +218,16 @@ async def analyze(
     include_phones: bool = Query(False, description="Return per-word and per-phone detail"),
 ):
     with tempfile.TemporaryDirectory() as tmp_dir:
-        wav_path, duration = await run_in_threadpool(_save_as_wav, audio, Path(tmp_dir))
+        with timed("decode"):
+            wav_path, duration = await run_in_threadpool(_save_as_wav, audio, Path(tmp_dir))
+        note(audio_s=round(duration, 1))
         if duration < MIN_DURATION:
             raise AudioTooShortError(f"Audio too short. Record at least {MIN_DURATION:.0f} second.")
         if duration > MAX_DURATION:
             raise AudioTooLongError(f"Audio too long. Keep it under {MAX_DURATION:.0f} seconds.")
 
         alignment = await app.state.aligner.align(wav_path, duration, transcript)
+        note(words=len(alignment.speech_words), oovs=len(alignment.oovs))
         phones = await app.state.analyzer.measure(wav_path, alignment)
         aggregates = score(phones)
 
@@ -263,6 +270,7 @@ class LexiconRequest(BaseModel):
 
 @app.post("/lexicon", dependencies=[Depends(require_token)])
 async def lexicon(body: LexiconRequest):
+    note(entries=len(body.words))
     tokenized = await app.state.aligner.tokenize(body.words)
     return {
         "version": __version__,
