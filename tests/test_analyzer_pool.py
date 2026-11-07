@@ -115,6 +115,8 @@ def test_a_pass_reports_its_wait_for_a_worker_apart_from_its_run(start_pool, mon
 
     async def scenario():
         await pool.wait_ready()
+        # The stand-in's first call imports this module in the worker, and that import counts as wait.
+        await pool.measure(READY, NO_PHONES)
         return await asyncio.gather(
             noted(pool.measure(SLOW, NO_PHONES)), noted(pool.measure(SLOW, NO_PHONES))
         )

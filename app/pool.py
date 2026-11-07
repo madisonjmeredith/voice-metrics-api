@@ -7,6 +7,7 @@ carries its exit code: -6 is abort(), -9 a kill, -11 a segfault.
 
 import asyncio
 import logging
+import multiprocessing.connection
 import os
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
@@ -63,7 +64,7 @@ class WarmPool:
     def state(self) -> PoolState:
         """STALLED is still loading past warmup_timeout; DOWN is a failed load or a dead worker."""
         pool = self._pool
-        if pool is None or any(map(_failed, self._warmups)) or _exit_codes(pool):
+        if pool is None or any(map(_failed, self._warmups)) or _dead_workers(pool):
             return PoolState.DOWN
         if self._load_overdue(self._warmups, self._started_at):
             return PoolState.STALLED
@@ -119,10 +120,19 @@ class WarmPool:
             logger.info("%s ready load_s=%.1f", self.name, time.monotonic() - self._started_at)
 
 
-def _exit_codes(pool: ProcessPoolExecutor) -> list[int]:
-    return [p.exitcode for p in pool._processes.values() if p.exitcode is not None]
+def _dead_workers(pool: ProcessPoolExecutor) -> list[multiprocessing.Process]:
+    workers = {p.sentinel: p for p in pool._processes.values()}
+    return [workers[s] for s in multiprocessing.connection.wait(list(workers), timeout=0)]
+
+
+def _exit_code(worker: multiprocessing.Process, deadline: float) -> Optional[int]:
+    # The executor's thread may be mid-reap, when exitcode reads None until that thread records it.
+    while worker.exitcode is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    return worker.exitcode
 
 
 def _exited(pool: ProcessPoolExecutor) -> str:
-    codes = _exit_codes(pool)
+    deadline = time.monotonic() + 0.1
+    codes = [_exit_code(worker, deadline) for worker in _dead_workers(pool)]
     return f" exitcode={','.join(map(str, codes))}" if codes else ""
