@@ -23,11 +23,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R $MAMBA_USER:$MAMBA_USER $MODEL_DIR
 USER $MAMBA_USER
 
-COPY --chown=$MAMBA_USER:$MAMBA_USER env.yaml /tmp/env.yaml
-RUN micromamba install -y -n base -f /tmp/env.yaml && micromamba clean --all --yes
+COPY --chown=$MAMBA_USER:$MAMBA_USER env.lock /tmp/env.lock
+RUN micromamba install -y -n base -f /tmp/env.lock && micromamba clean --all --yes
 
-COPY --chown=$MAMBA_USER:$MAMBA_USER requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY --chown=$MAMBA_USER:$MAMBA_USER requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock
 
 # MFA creates its root directory at import time, so it must be writable. Nothing
 # in it needs to persist: models are passed by path from MODEL_DIR.
@@ -49,5 +49,5 @@ CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 1
 FROM base AS test
 COPY --chown=$MAMBA_USER:$MAMBA_USER requirements-dev.txt /tmp/requirements-dev.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt
-COPY --chown=$MAMBA_USER:$MAMBA_USER pytest.ini /app/
+COPY --chown=$MAMBA_USER:$MAMBA_USER pytest.ini env.yaml env.lock requirements.txt requirements.lock /app/
 COPY --chown=$MAMBA_USER:$MAMBA_USER tests/ /app/tests/
