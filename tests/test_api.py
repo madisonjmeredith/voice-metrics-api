@@ -22,7 +22,7 @@ from app.converter import AudioDecodeError
 from app.measurement import MeasuredPhone
 from app.pool import PoolState
 from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
-from tests.conftest import needs_ffmpeg, post_analyze, vowel_alignment
+from tests.conftest import needs_ffmpeg, post_analyze, use_token, vowel_alignment
 
 NAME = "Quillonae"
 
@@ -36,10 +36,11 @@ class FakeAligner:
         self.lexicon = lexicon or {}
         self.load_error = load_error
         self.calls = []
+        self.started = False
         self.stopped = False
 
     def start(self):
-        pass
+        self.started = True
 
     async def wait_ready(self):
         if self.load_error is not None:
@@ -67,10 +68,11 @@ class InlineAnalyzer:
 
     def __init__(self, error=None):
         self.error = error
+        self.started = False
         self.stopped = False
 
     def start(self):
-        pass
+        self.started = True
 
     async def wait_ready(self):
         pass
@@ -86,6 +88,9 @@ class InlineAnalyzer:
 
 @pytest.fixture
 def client(monkeypatch):
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED", "1")
+
     def make(aligner, analyzer=None, **kwargs):
         monkeypatch.setattr(main, "create_aligner", lambda: aligner)
         monkeypatch.setattr(main, "create_analyzer", lambda: analyzer or InlineAnalyzer())
@@ -306,7 +311,7 @@ def test_routing_errors_carry_a_code(client, path, status, code, allow):
 
 @needs_ffmpeg
 def test_bearer_token_when_configured(client, vowel_a, monkeypatch):
-    monkeypatch.setattr(main, "API_TOKEN", "s3cret")
+    use_token(monkeypatch)
     with client(FakeAligner(vowel_alignment())) as c:
         denied = post_analyze(c, vowel_a)
         c.headers["Authorization"] = "Bearer s3cret"
@@ -316,12 +321,48 @@ def test_bearer_token_when_configured(client, vowel_a, monkeypatch):
 
 
 def test_a_non_ascii_token_is_unauthorized(client, monkeypatch):
-    monkeypatch.setattr(main, "API_TOKEN", "s3cret")
+    use_token(monkeypatch)
     with client(FakeAligner()) as c:
         response = c.post(
             "/lexicon", json={"words": ["hello"]}, headers={"Authorization": b"Bearer caf\xc3\xa9"}
         )
     assert error_of(response) == tuple(main.ERRORS[main.InvalidTokenError])
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"API_TOKEN": ""},
+        {"API_TOKEN": "s3cret", "ALLOW_UNAUTHENTICATED": "1"},
+        {"ALLOW_UNAUTHENTICATED": "true"},
+    ],
+)
+def test_it_refuses_to_start_unless_the_auth_mode_is_clear(client, monkeypatch, logs, env):
+    monkeypatch.delenv("ALLOW_UNAUTHENTICATED")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    aligner, analyzer = FakeAligner(), InlineAnalyzer()
+    with pytest.raises(main.ConfigError):
+        with client(aligner, analyzer):
+            pass
+    assert not aligner.started and not analyzer.started
+    assert [r.levelno for r in logs.records if r.name == "app.main"] == [logging.ERROR]
+    assert "s3cret" not in logs.text
+
+
+@pytest.mark.parametrize(
+    "token, level, mode",
+    [("s3cret", logging.INFO, "auth=bearer"), (None, logging.WARNING, "auth=off")],
+)
+def test_startup_logs_the_auth_mode(client, monkeypatch, logs, token, level, mode):
+    if token is not None:
+        use_token(monkeypatch, token)
+    with client(FakeAligner()):
+        pass
+    [line] = [r for r in logs.records if r.getMessage().startswith(f"{mode}:")]
+    assert line.levelno == level
+    assert token is None or token not in logs.text
 
 
 @pytest.mark.parametrize(
@@ -430,7 +471,7 @@ def test_lexicon_answers_503_when_the_aligner_cannot(client, error):
 
 
 def test_lexicon_needs_the_bearer_token_when_configured(client, monkeypatch):
-    monkeypatch.setattr(main, "API_TOKEN", "s3cret")
+    use_token(monkeypatch)
     with client(FakeAligner()) as c:
         denied = c.post("/lexicon", json={"words": ["hello"]})
         c.headers["Authorization"] = "Bearer s3cret"

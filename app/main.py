@@ -44,7 +44,22 @@ MIN_SCORED_PHONES = 3
 MAX_LEXICON_WORDS = 1000
 MAX_WORD_LENGTH = 200
 
-API_TOKEN = os.environ.get("API_TOKEN")
+
+class ConfigError(RuntimeError):
+    """The environment doesn't say how requests are authenticated."""
+
+
+def _api_token() -> Optional[str]:
+    """API_TOKEN, or None when ALLOW_UNAUTHENTICATED=1 turns auth off; raises on neither or both."""
+    token = os.environ.get("API_TOKEN") or None
+    allow = os.environ.get("ALLOW_UNAUTHENTICATED", "")
+    if allow not in ("", "1"):
+        raise ConfigError("ALLOW_UNAUTHENTICATED must be 1 or unset")
+    if token and allow:
+        raise ConfigError("Set API_TOKEN or ALLOW_UNAUTHENTICATED=1, not both")
+    if not token and not allow:
+        raise ConfigError("API_TOKEN is not set. Set it, or set ALLOW_UNAUTHENTICATED=1 to run without auth")
+    return token
 
 
 def create_aligner() -> AlignerPool:
@@ -57,6 +72,15 @@ def create_analyzer() -> AnalyzerPool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        app.state.api_token = _api_token()
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        raise
+    if app.state.api_token is None:
+        logger.warning("auth=off: /analyze and /lexicon take requests without a token")
+    else:
+        logger.info("auth=bearer: /analyze and /lexicon need the API_TOKEN bearer token")
     app.state.aligner = create_aligner()
     app.state.analyzer = create_analyzer()
     app.state.aligner.start()
@@ -156,11 +180,12 @@ async def _http_error(request: Request, exc: StarletteHTTPException):
 
 
 def require_token(authorization: Optional[str] = Header(None)) -> None:
-    """Shared-secret check, skipped entirely when no API_TOKEN is configured."""
-    if API_TOKEN is None:
+    """Shared-secret check against API_TOKEN, skipped only when ALLOW_UNAUTHENTICATED=1."""
+    token = app.state.api_token
+    if token is None:
         return
     # compare_digest raises TypeError on a non-ASCII str, which a header can carry.
-    if not secrets.compare_digest((authorization or "").encode(), f"Bearer {API_TOKEN}".encode()):
+    if not secrets.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
         raise InvalidTokenError("Invalid or missing bearer token")
 
 

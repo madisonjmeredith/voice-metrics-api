@@ -117,6 +117,11 @@ def post_analyze(client, path: Path, transcript="ah", **query):
         )
 
 
+def use_token(monkeypatch, token: str = "s3cret") -> None:
+    monkeypatch.setenv("API_TOKEN", token)
+    monkeypatch.delenv("ALLOW_UNAUTHENTICATED", raising=False)
+
+
 @pytest.fixture(scope="session")
 def aligner() -> LoadedAligner:
     return LoadedAligner(ACOUSTIC_DIR, DICTIONARY_PATH)

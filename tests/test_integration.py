@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from app.converter import get_audio_duration
-from tests.conftest import FIXTURES, FS, needs_mfa, post_analyze, write_wav
+from tests.conftest import FIXTURES, FS, needs_mfa, post_analyze, use_token, write_wav
 from tests.textgrids import parse_textgrid
 
 HELLO_WAV = FIXTURES / "hello.wav"
@@ -119,8 +119,10 @@ def app_client():
 
     import app.main as main
 
-    with TestClient(main.app) as client:
-        yield client
+    with pytest.MonkeyPatch.context() as mp:
+        use_token(mp)
+        with TestClient(main.app, headers={"Authorization": "Bearer s3cret"}) as client:
+            yield client
 
 
 @needs_mfa
