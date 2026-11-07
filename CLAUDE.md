@@ -250,7 +250,10 @@ carry over.
 from Luna McNulty's reference project, which makes this repo a derivative
 work. It is licensed AGPL-3.0 and its source must stay published. Do not
 relicense, and keep `NOTICE` accurate. `NOTICE` credits the author without
-naming or linking the project; leave it that way.
+naming or linking the project; leave it that way. The MFA acoustic model and
+dictionary are CC BY 4.0 (MFA's code is MIT), and the image's dictionary is a
+modified copy of the release file, which CC BY requires `NOTICE` to say: when
+the Dockerfile's merge changes, change that entry with it.
 
 **Out-of-vocabulary words are reported, not guessed.** G2P would mutate the
 shared lexicon per request and its thread-safety is unverified. `oovs` in

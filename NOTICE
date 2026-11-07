@@ -19,10 +19,23 @@ textgrid-formants.praat.
 Third-party components
 ----------------------
 
-- Montreal Forced Aligner and its english_us_arpa acoustic model and
-  dictionary (MIT), https://github.com/MontrealCorpusTools
+- Montreal Forced Aligner (MIT),
+  https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner
+- english_us_arpa acoustic model v3.0.0, by Michael McAuliffe and Morgan
+  Sonderegger (CC BY 4.0),
+  https://github.com/MontrealCorpusTools/mfa-models/releases/tag/acoustic-english_us_arpa-v3.0.0
+  The Docker image downloads it and uses it unmodified.
+- english_us_arpa dictionary v3.0.0, from the Montreal Forced Aligner project,
+  whose release cites Gorman, Howell, and Wagner, "Prosodylab-aligner" (2011)
+  (CC BY 4.0),
+  https://github.com/MontrealCorpusTools/mfa-models/releases/tag/dictionary-english_us_arpa-v3.0.0
+  The Docker image modifies it: the english_us_arpa.dict it loads is the
+  release file with dictionary/cmudict.dict and dictionary/custom.dict
+  appended.
 - Praat via praat-parselmouth (GPL-3.0), https://parselmouth.readthedocs.io
 - ffmpeg (LGPL/GPL), https://ffmpeg.org
 - CMU Pronouncing Dictionary (BSD-2-Clause), https://github.com/cmusphinx/cmudict
   dictionary/cmudict.dict is a subset of its entries, reformatted. Its
   copyright notice and license are in dictionary/LICENSE.cmudict.
+
+CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
