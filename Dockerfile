@@ -35,6 +35,8 @@ ENV MFA_ROOT_DIR=/tmp/mfa
 
 WORKDIR /app
 
+COPY --chown=$MAMBA_USER:$MAMBA_USER LICENSE NOTICE /app/
+
 COPY --chown=$MAMBA_USER:$MAMBA_USER dictionary/ /app/dictionary/
 RUN cat $MODEL_DIR/dictionary/english_us_arpa.base.dict \
         /app/dictionary/cmudict.dict /app/dictionary/custom.dict \

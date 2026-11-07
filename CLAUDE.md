@@ -22,6 +22,7 @@ Source is in `app/`, tests in `tests/`. Non-obvious parts:
 - `app/pool.py` holds what both worker pools share (`WarmPool`): warm-up, restart, their log lines, and the probes' `state`.
 - `app/telemetry.py` is imported by the worker processes, so it stays standard library only; the Starlette middleware is in `app/request_log.py`.
 - `dictionary/cmudict.dict` is generated (see below); `dictionary/LICENSE.cmudict` stays beside it; `dictionary/custom.dict` is hand-written and appended last.
+- `LICENSE`, `NOTICE`, and `dictionary/LICENSE.cmudict` ship in the image; `tests/test_licenses.py` fails in the image if one is left out.
 - `env.lock` and `requirements.lock` are generated from `env.yaml` and `requirements.txt` (see below); edit the inputs, never the locks.
 - `tests/textgrids.py` is used only to turn checked-in alignments into fixtures.
 - `tests/test_aligner.py` and `tests/test_worker.py` run without MFA, over stand-ins.
