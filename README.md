@@ -7,7 +7,9 @@ if you ask for it, a reading for every phone the aligner found.
 It force-aligns the transcript to the audio with [Montreal Forced Aligner](https://montreal-forced-aligner.readthedocs.io),
 measures F0 and F1–F3 with Praat at the midpoint of each phone, and scores each
 phone against per-phoneme population statistics. Licensed AGPL-3.0; see
-`NOTICE` for what is derived and from whom.
+`NOTICE` for what is derived and from whom. `GET /` links to this repository.
+If you run a modified version, point `SOURCE_URL` in `app/main.py` at your own
+source.
 
 ## API
 

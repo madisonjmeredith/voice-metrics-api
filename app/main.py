@@ -43,6 +43,7 @@ MAX_DURATION = 60.0
 MIN_SCORED_PHONES = 3
 MAX_LEXICON_WORDS = 1000
 MAX_WORD_LENGTH = 200
+SOURCE_URL = "https://github.com/madisonjmeredith/voice-metrics-api"
 
 
 class ConfigError(RuntimeError):
@@ -332,6 +333,7 @@ async def root():
     return {
         "name": "voice-metrics-api",
         "version": __version__,
+        "source": SOURCE_URL,
         "endpoints": {
             "POST /analyze": "Score a recording against its transcript",
             "POST /lexicon": "Report which words the pronunciation dictionary has",

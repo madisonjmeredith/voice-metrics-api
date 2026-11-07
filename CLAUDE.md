@@ -252,9 +252,15 @@ from Luna McNulty's reference project, which makes this repo a derivative
 work. It is licensed AGPL-3.0 and its source must stay published. Do not
 relicense, and keep `NOTICE` accurate. `NOTICE` credits the author without
 naming or linking the project; leave it that way. The MFA acoustic model and
-dictionary are CC BY 4.0 (MFA's code is MIT), and the image's dictionary is a
+dictionary are CC BY 4.0 (MFA's code is MIT; their `LICENSE` files carry no
+copyright line, so `NOTICE` names the creators from each release page's
+citation), and the image's dictionary is a
 modified copy of the release file, which CC BY requires `NOTICE` to say: when
-the Dockerfile's merge changes, change that entry with it.
+the Dockerfile's merge changes, change that entry with it. `GET /`'s `source`
+is the AGPL section 13 offer of source to network users. Whether section 13
+reaches people who only use the client is unsettled (#23); the link is there
+either way because it's cheap. It's a constant, not an env var: whoever must
+point it elsewhere is running modified code and is editing the source anyway.
 
 **Out-of-vocabulary words are reported, not guessed.** G2P would mutate the
 shared lexicon per request and its thread-safety is unverified. `oovs` in

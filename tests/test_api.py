@@ -417,6 +417,11 @@ def test_every_endpoint_reports_the_one_version(client):
         assert c.post("/lexicon", json={"words": ["hello"]}).json()["version"] == __version__
 
 
+def test_root_links_to_the_source(client):
+    with client(FakeAligner()) as c:
+        assert c.get("/").json()["source"] == "https://github.com/madisonjmeredith/voice-metrics-api"
+
+
 def test_lexicon_reports_each_word_in_order(client):
     lexicon = {"Zorblax": ("zorblax", ["zorblax"]), "...": ("", [])}
     with client(FakeAligner(lexicon=lexicon)) as c:
