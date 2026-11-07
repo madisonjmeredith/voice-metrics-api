@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # praat-parselmouth has no aarch64 wheels and MFA's Kaldi builds are linux-64,
 # so this image is amd64 only. Build with --platform linux/amd64 on Apple Silicon.
-FROM --platform=linux/amd64 mambaorg/micromamba:2.9.0-debian13 AS base
+FROM --platform=linux/amd64 mambaorg/micromamba:2.9.0-debian13@sha256:a8d98f861cb0d415870c515fcb71658802d4e9254e7d8a361b7e6fc866801ced AS base
 
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
 
