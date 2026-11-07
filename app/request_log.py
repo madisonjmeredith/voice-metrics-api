@@ -57,7 +57,7 @@ class RequestLog:
                 error = type(e).__name__
                 raise
             finally:
-                if scope["path"] not in self.quiet:
+                if scope["path"] not in self.quiet or status >= 500:
                     _log_request(scope, status, error, time.perf_counter() - started, fields)
 
 

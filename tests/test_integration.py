@@ -125,7 +125,7 @@ def app_client():
 
 @needs_mfa
 def test_full_request_through_the_app(app_client):
-    assert app_client.get("/health").json()["aligner"] == "ready"
+    assert app_client.get("/ready").status_code == 200
     response = post_analyze(app_client, HELLO_WAV, HELLO_TEXT, include_phones=1)
     assert response.status_code == 200, response.text
     body = response.json()

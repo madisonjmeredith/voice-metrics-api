@@ -20,6 +20,7 @@ import app.analyzer_pool as analyzer_pool
 from app.analyzer_pool import AnalyzerUnavailable
 from app.converter import AudioDecodeError
 from app.measurement import MeasuredPhone
+from app.pool import PoolState
 from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
 from tests.conftest import needs_ffmpeg, post_analyze, vowel_alignment
 
@@ -27,7 +28,7 @@ NAME = "Quillonae"
 
 
 class FakeAligner:
-    ready = True
+    state = PoolState.READY
 
     def __init__(self, result=None, error=None, lexicon=None, load_error=None):
         self.result = result
@@ -61,6 +62,8 @@ class FakeAligner:
 
 class InlineAnalyzer:
     """Real Praat readings, taken in the test process so no test spawns a worker."""
+
+    state = PoolState.READY
 
     def __init__(self, error=None):
         self.error = error
@@ -312,13 +315,46 @@ def test_bearer_token_when_configured(client, vowel_a, monkeypatch):
     assert allowed.status_code == 200
 
 
-def test_health(client):
-    with client(FakeAligner(vowel_alignment())) as c:
-        assert c.get("/health").json() == {
-            "version": __version__,
-            "status": "healthy",
-            "aligner": "ready",
-        }
+@pytest.mark.parametrize(
+    "aligner, analyzer, live, ready",
+    [
+        ("ready", "ready", 200, 200),
+        ("warming", "ready", 200, 503),
+        ("ready", "warming", 200, 503),
+        ("stalled", "ready", 503, 503),
+        ("down", "warming", 503, 503),
+        ("ready", "down", 503, 503),
+    ],
+)
+def test_the_probes_answer_for_both_pools(client, aligner, analyzer, live, ready):
+    fake, inline = FakeAligner(), InlineAnalyzer()
+    with client(fake, inline) as c:
+        fake.state, inline.state = PoolState(aligner), PoolState(analyzer)
+        health, readiness = c.get("/health"), c.get("/ready")
+
+    states = {"aligner": aligner, "analyzer": analyzer}
+    assert (health.status_code, readiness.status_code) == (live, ready)
+    assert health.json().items() >= states.items() and readiness.json().items() >= states.items()
+
+
+def test_a_probe_body_names_its_verdict(client):
+    fake = FakeAligner()
+    with client(fake) as c:
+        passing = [c.get("/health").json()["status"], c.get("/ready").json()["status"]]
+        fake.state = PoolState.STALLED
+        failing = [c.get("/health").json()["status"], c.get("/ready").json()["status"]]
+    assert (passing, failing) == (["healthy", "ready"], ["unhealthy", "not_ready"])
+
+
+def test_a_failing_probe_is_logged_with_both_states(client, logs):
+    fake = FakeAligner()
+    with client(fake) as c:
+        fake.state = PoolState.WARMING
+        c.get("/health")
+        c.get("/ready")
+    [line] = request_lines(logs)
+    assert line.levelno == logging.WARNING
+    assert re.fullmatch(r"GET /ready 503 total_ms=\d+ aligner=warming analyzer=ready", line.getMessage())
 
 
 def test_every_endpoint_reports_the_one_version(client):
@@ -327,6 +363,7 @@ def test_every_endpoint_reports_the_one_version(client):
     with client(FakeAligner()) as c:
         assert c.get("/").json()["version"] == __version__
         assert c.get("/health").json()["version"] == __version__
+        assert c.get("/ready").json()["version"] == __version__
         assert c.post("/lexicon", json={"words": ["hello"]}).json()["version"] == __version__
 
 
@@ -437,6 +474,7 @@ def test_an_unhandled_exception_logs_a_500(client, vowel_a, logs):
 def test_probes_are_left_out_of_the_request_log(client, logs):
     with client(FakeAligner()) as c:
         c.get("/health")
+        c.get("/ready")
         c.get("/")
     assert [line.getMessage().split()[:3] for line in request_lines(logs)] == [["GET", "/", "200"]]
 

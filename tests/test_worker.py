@@ -16,7 +16,7 @@ import pytest
 
 import app.worker as worker
 from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
-from tests.conftest import kill_workers, noted, pool_lines
+from tests.conftest import eventually, kill_workers, noted, pool_lines
 
 WAV = Path("unused.wav")
 SPAWN_TIMEOUT = 60.0
@@ -192,6 +192,7 @@ def test_a_load_that_fails_is_logged(start_pool, caplog):
         asyncio.run(pool.wait_ready())
 
     assert pool_lines(caplog, logging.ERROR) == ["aligner load failed: RuntimeError: bad dictionary"]
+    assert pool.state == "down"
 
 
 def test_a_worker_lost_during_the_load_is_logged_with_its_exit_code(start_pool, caplog):
@@ -211,7 +212,23 @@ def test_a_worker_lost_during_the_load_is_logged_with_its_exit_code(start_pool, 
 
 def test_a_load_that_outlasts_the_warm_up_timeout_is_logged(start_pool, caplog):
     pool = start_pool(warmup="hang", warmup_timeout=0.3)
+    assert pool.state == "warming"
     with pytest.raises(TimeoutError):
         asyncio.run(pool.wait_ready())
 
     assert pool_lines(caplog, logging.ERROR) == ["aligner did not load within 0.3 s"]
+    assert pool.state == "stalled"
+
+
+def test_the_state_follows_the_load_and_the_worker(start_pool):
+    pool = start_pool(warmup="brief")
+    assert pool.state == "warming"
+    asyncio.run(pool.wait_ready())
+    assert pool.state == "ready"
+
+    kill_workers(pool)
+    eventually(lambda: pool.state == "down")
+    with pytest.raises(AlignerUnavailable):
+        asyncio.run(pool.align(WAV, 0.0, "ready"))
+    assert pool.state == "warming"
+

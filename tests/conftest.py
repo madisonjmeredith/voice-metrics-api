@@ -9,6 +9,7 @@ tests/fixtures/README.md.
 
 import logging
 import shutil
+import time
 import wave
 from pathlib import Path
 
@@ -92,6 +93,13 @@ async def noted(call):
 
 def pool_lines(caplog, level: int = logging.WARNING) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.name == "app.pool" and r.levelno == level]
+
+
+def eventually(check, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not check():
+        assert time.monotonic() < deadline, "timed out waiting"
+        time.sleep(0.02)
 
 
 def kill_workers(pool) -> None:

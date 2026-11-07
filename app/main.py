@@ -13,7 +13,7 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, NamedTuple, Optional
+from typing import Annotated, Callable, NamedTuple, Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -29,6 +29,7 @@ from app.analyzer_pool import AnalyzerPool, AnalyzerUnavailable
 from app.converter import AudioDecodeError, convert_to_wav, get_audio_duration
 from app.measurement import MeasuredPhone
 from app.scoring import score
+from app.pool import PoolState
 from app.request_log import RequestLog
 from app.telemetry import configure_logging, note, timed
 from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
@@ -74,7 +75,7 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
-app.add_middleware(RequestLog, quiet=frozenset({"/health"}))
+app.add_middleware(RequestLog, quiet=frozenset({"/health", "/ready"}))
 
 
 class InvalidTokenError(Exception):
@@ -202,14 +203,26 @@ def _save_as_wav(upload: UploadFile, tmp_path: Path) -> tuple[Path, float]:
     return wav_path, get_audio_duration(wav_path)
 
 
+def _probe(passes: Callable[[PoolState], bool], verdicts: tuple[str, str]) -> JSONResponse:
+    states = {"aligner": app.state.aligner.state, "analyzer": app.state.analyzer.state}
+    note(**states)
+    ok = all(passes(state) for state in states.values())
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={"version": __version__, "status": verdicts[0] if ok else verdicts[1], **states},
+    )
+
+
 @app.get("/health")
 async def health_check():
-    aligner: AlignerPool = app.state.aligner
-    return {
-        "version": __version__,
-        "status": "healthy",
-        "aligner": "ready" if aligner.ready else "warming",
-    }
+    """Liveness: 503 while either pool is stalled or down."""
+    return _probe(lambda state: state.live, ("healthy", "unhealthy"))
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness: 200 only once both pools have loaded."""
+    return _probe(lambda state: state is PoolState.READY, ("ready", "not_ready"))
 
 
 @app.post("/analyze", dependencies=[Depends(require_token)])
@@ -296,5 +309,6 @@ async def root():
             "POST /analyze": "Score a recording against its transcript",
             "POST /lexicon": "Report which words the pronunciation dictionary has",
             "GET /health": "Liveness check",
+            "GET /ready": "Readiness check",
         },
     }

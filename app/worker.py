@@ -89,12 +89,6 @@ class AlignerPool(WarmPool):
     def _submit_warmups(self, pool: ProcessPoolExecutor) -> list[Future]:
         return [pool.submit(_align, WARMUP_WAV, get_audio_duration(WARMUP_WAV), WARMUP_TRANSCRIPT)]
 
-    @property
-    def ready(self) -> bool:
-        return bool(self._warmups) and all(
-            f.done() and f.exception() is None for f in self._warmups
-        )
-
     async def _wait_for_turn(self, warmup: Future) -> bool:
         """Wait out the warm-up and the calls ahead, then take the turn; False if time runs out."""
         loaded = asyncio.gather(asyncio.wrap_future(warmup), return_exceptions=True)
@@ -113,7 +107,7 @@ class AlignerPool(WarmPool):
         with timed("aligner_wait"):
             reached = await self._wait_for_turn(warmup)
         if not reached:
-            if not warmup.done() and time.monotonic() - started_at > self.warmup_timeout:
+            if self._load_overdue([warmup], started_at):
                 self._restart_if_current(pool, "warmup_timeout")
                 raise AlignerUnavailable(
                     f"The aligner did not load within {self.warmup_timeout:.0f} s"

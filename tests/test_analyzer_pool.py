@@ -18,7 +18,7 @@ import app.analyzer_pool as analyzer_pool
 from app.analyzer import AudioAnalyzer
 from app.analyzer_pool import NO_PHONES, AnalyzerPool, AnalyzerUnavailable
 from app.measurement import measure_phones
-from tests.conftest import FS, kill_workers, noted, pool_lines, vowel_alignment, write_wav
+from tests.conftest import FS, noted, pool_lines, vowel_alignment, write_wav
 
 HANG = Path("hang.wav")
 SLOW = Path("slow.wav")
@@ -131,3 +131,4 @@ def test_a_load_is_logged_once_every_worker_is_warm(start_pool, caplog):
 
     [line] = pool_lines(caplog, logging.INFO)
     assert re.fullmatch(r"analyzer ready load_s=\d+\.\d", line)
+    assert pool.state == "ready"

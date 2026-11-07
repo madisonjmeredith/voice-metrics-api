@@ -10,6 +10,7 @@ import logging
 import os
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
+from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import Optional
@@ -18,6 +19,18 @@ WARMUP_TIMEOUT = float(os.environ.get("WARMUP_TIMEOUT", "60"))
 WARMUP_WAV = Path(__file__).parent / "warmup.wav"
 
 logger = logging.getLogger(__name__)
+
+
+class PoolState(StrEnum):
+    READY = "ready"
+    WARMING = "warming"
+    STALLED = "stalled"
+    DOWN = "down"
+
+    @property
+    def live(self) -> bool:
+        """False for the states a pool leaves only when a call arrives and restarts it."""
+        return self not in (PoolState.STALLED, PoolState.DOWN)
 
 
 def _failed(future: Future) -> bool:
@@ -45,6 +58,22 @@ class WarmPool:
         self._warmups = self._submit_warmups(pool)
         for future in self._warmups:
             future.add_done_callback(partial(self._log_load, pool))
+
+    @property
+    def state(self) -> PoolState:
+        """STALLED is still loading past warmup_timeout; DOWN is a failed load or a dead worker."""
+        pool = self._pool
+        if pool is None or any(map(_failed, self._warmups)) or _exit_codes(pool):
+            return PoolState.DOWN
+        if self._load_overdue(self._warmups, self._started_at):
+            return PoolState.STALLED
+        if not all(f.done() for f in self._warmups):
+            return PoolState.WARMING
+        return PoolState.READY
+
+    def _load_overdue(self, warmups: list[Future], started_at: float) -> bool:
+        unfinished = not all(f.done() for f in warmups)
+        return unfinished and time.monotonic() - started_at > self.warmup_timeout
 
     async def wait_ready(self) -> None:
         """Block until every warm-up passes; raises if one failed or the load outlasts warmup_timeout."""
@@ -90,6 +119,10 @@ class WarmPool:
             logger.info("%s ready load_s=%.1f", self.name, time.monotonic() - self._started_at)
 
 
+def _exit_codes(pool: ProcessPoolExecutor) -> list[int]:
+    return [p.exitcode for p in pool._processes.values() if p.exitcode is not None]
+
+
 def _exited(pool: ProcessPoolExecutor) -> str:
-    codes = [str(p.exitcode) for p in pool._processes.values() if p.exitcode is not None]
-    return f" exitcode={','.join(codes)}" if codes else ""
+    codes = _exit_codes(pool)
+    return f" exitcode={','.join(map(str, codes))}" if codes else ""
