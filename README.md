@@ -20,9 +20,7 @@ Multipart form.
 | `audio` | file | Anything ffmpeg decodes; browsers send WebM or MP4 |
 | `transcript` | string | The English text that was read aloud |
 
-Query parameter `include_phones=1` adds `words` and `phones` to the response.
-Audio must be 1–60 seconds. With `API_TOKEN` set on the server, requests need
-`Authorization: Bearer <token>`.
+Query parameter `include_phones=1` adds `words` and `phones` to the response. Audio must be 1–60 seconds. Requests need `Authorization: Bearer <token>` with the server's `API_TOKEN` as the token. A server started with `ALLOW_UNAUTHENTICATED=1` takes them without one (see [Running it](#running-it)).
 
 ```json
 {
@@ -111,7 +109,7 @@ These are for a platform's health checks. Both return the same body at 200 and a
 - `/health` is the liveness check. It answers 503 (`"status": "unhealthy"`) only while a pool is `stalled` or `down`. A pool leaves those states only when a request arrives and restarts it, so an instance that a router has stopped sending traffic to would stay stuck. A normal reload stays 200 so the check doesn't get an instance replaced in the middle of one.
 - `/ready` is the readiness check. It answers 200 (`"status": "ready"`) only when both pools are `ready` and 503 (`"not_ready"`) otherwise.
 
-The server doesn't accept connections until both pools have loaded at startup, about 10 seconds under emulation. If the load is still running after `WARMUP_TIMEOUT`, the server logs which pool didn't load and exits with code 3. Give the platform's startup check at least `WARMUP_TIMEOUT` before it gives up.
+The server doesn't accept connections until both pools have loaded at startup, about 10 seconds under emulation. If the load is still running after `WARMUP_TIMEOUT`, the server logs which pool didn't load and exits with code 3. It exits the same way before loading anything when it can't tell whether auth is meant to be on (see [Running it](#running-it)). Give the platform's startup check at least `WARMUP_TIMEOUT` before it gives up.
 
 On a single instance, point only the liveness check at the service. A router that follows `/ready` sends nothing during a reload, so requests that would have waited it out fail at the router instead.
 
@@ -231,7 +229,7 @@ Run `.venv/bin/pytest` after editing the file. `tests/test_dictionary.py` checks
 
 ```sh
 docker build --platform linux/amd64 --target base -t voice-metrics-api .
-docker run --rm --platform linux/amd64 -p 8080:8080 voice-metrics-api
+docker run --rm --platform linux/amd64 -p 8080:8080 -e ALLOW_UNAUTHENTICATED=1 voice-metrics-api
 curl -F audio=@clip.webm -F transcript="Hello there, world." "localhost:8080/analyze?include_phones=1"
 curl --json '{"words": ["Hello", "Siobhán"]}' localhost:8080/lexicon
 ```
@@ -239,12 +237,16 @@ curl --json '{"words": ["Hello", "Siobhán"]}' localhost:8080/lexicon
 `--target base` matters: `test` is the Dockerfile's last stage, so a build
 without it produces the test image, with pytest and the suite inside.
 
+`ALLOW_UNAUTHENTICATED=1` turns the bearer token off, which is fine on your own machine and nowhere else. A deployed server gets `API_TOKEN` instead.
+
+The server refuses to start without one or the other. A secret that never made it into the environment stops the deploy instead of opening `/analyze` and `/lexicon` to anyone. It also refuses both at once and any `ALLOW_UNAUTHENTICATED` value but `1`. An empty `API_TOKEN` counts as missing. Each refusal logs the reason and exits with code 3 before anything loads. A server that does start logs `auth=bearer`, or `auth=off` as a warning.
+
 To keep a container running in the background and rebuild it after a change, give it a name and replace it each time:
 
 ```sh
 docker rm -f voice-metrics-api
 docker build --platform linux/amd64 --target base -t voice-metrics-api .
-docker run -d --name voice-metrics-api --platform linux/amd64 -p 8080:8080 voice-metrics-api
+docker run -d --name voice-metrics-api --platform linux/amd64 -p 8080:8080 -e ALLOW_UNAUTHENTICATED=1 voice-metrics-api
 ```
 
 The first line stops and removes the old container so the new one can take its name and port 8080. It does nothing on the first run, when there's no container to remove.
@@ -253,13 +255,13 @@ The image is amd64 only: `praat-parselmouth` has no arm64 wheels and MFA's
 Kaldi build is linux-64. On Apple Silicon the build and the container run
 under emulation.
 
-Environment variables: `PORT` (8080), `API_TOKEN` (unset means no auth), `ALIGN_TIMEOUT` seconds (10), `WARMUP_TIMEOUT` seconds (60), `ANALYZER_WORKERS` Praat processes (2), `MODEL_DIR` (/opt/mfa-models).
+Environment variables: `PORT` (8080), `API_TOKEN` (required unless `ALLOW_UNAUTHENTICATED=1`), `ALLOW_UNAUTHENTICATED` (`1` turns auth off), `ALIGN_TIMEOUT` seconds (10), `WARMUP_TIMEOUT` seconds (60), `ANALYZER_WORKERS` Praat processes (2), `MODEL_DIR` (/opt/mfa-models).
 
 Each Praat process holds about 150 MB. Requests queue for a free one under a burst of long clips, and a host with CPUs to spare can raise `ANALYZER_WORKERS` to get through a burst faster.
 
 ## Logs
 
-The service writes to stderr: one line per request, and a line whenever the aligner or the Praat workers restart, finish loading, or fail to load. These came from a container whose aligner was killed while idle:
+The service writes to stderr: a line at startup with the auth mode, one line per request, and a line whenever the aligner or the Praat workers restart, finish loading, or fail to load. These came from a container whose aligner was killed while idle:
 
 ```text
 2026-11-07 18:26:17,099 INFO request=job-41 POST /analyze 200 total_ms=199 decode_ms=101 audio_s=1.3 aligner_wait_ms=0 aligner_ms=5 words=2 oovs=1 praat_wait_ms=1 praat_ms=69

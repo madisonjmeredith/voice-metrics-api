@@ -185,6 +185,26 @@ waits up to 0.1 s for the manager thread to store the code. `is_alive()` and
 `warmup_timeout` restart) isn't logged as a failed load. The Praat pool's line
 can list `-15` for the siblings the executor stops itself.
 
+**A missing token refuses to start (#21).** `require_token` used to skip the
+check whenever `API_TOKEN` was unset, so a deploy that forgot the secret served
+`/analyze` and `/lexicon` to anyone. `_api_token` in `app/main.py` runs first
+in `lifespan`, before either pool is created, and raises `ConfigError`
+(uvicorn's exit code 3, within a second or two) unless exactly one of a
+non-empty `API_TOKEN` and `ALLOW_UNAUTHENTICATED=1` is set. An empty token
+counts as unset because `-e API_TOKEN=$MISSING_SECRET` expands to empty. Both
+set refuses instead of picking one, and any other `ALLOW_UNAUTHENTICATED` value
+refuses so `true` or `0` isn't guessed at. The startup line names the mode
+(`auth=bearer` at INFO, `auth=off` at WARNING) and never the token.
+`require_token` reads `app.state.api_token`, which only `lifespan` sets, so an
+app whose lifespan never ran fails the request instead of passing it; don't
+move the token back to a module global read at import, which the tests also
+rely on (they `setenv` per test). The comparison is `compare_digest` on bytes:
+on `str` it raises `TypeError` for non-ASCII, and Starlette decodes headers as
+latin-1, so such a header would be a 500 instead of a 401. The `client`
+fixture in `tests/test_api.py` runs with `ALLOW_UNAUTHENTICATED=1`;
+`use_token` in `tests/conftest.py` switches a test, or the integration
+fixture, to bearer.
+
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
 or PostgreSQL setup to the image.
@@ -417,6 +437,9 @@ byte for byte against an older container can't show that an aggregation change
 left existing figures alone. Recompute `mean`, `median`, and `stdev` from the
 same response's `include_phones=1` phones (those with a resonance that aren't
 outliers) and check they match it.
+
+A container started by hand from the image (load tests, the worker-loss reproduction below)
+exits with code 3 unless it gets `-e ALLOW_UNAUTHENTICATED=1` or `-e API_TOKEN=...`.
 
 To reproduce a worker loss in a running container (#18), kill the aligner process
 with `docker exec <container> sh -c 'kill -9 <pid>'`: the image has no `kill` or
