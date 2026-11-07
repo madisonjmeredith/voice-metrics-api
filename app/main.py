@@ -9,6 +9,7 @@ Flow: upload → ffmpeg → forced alignment (MFA, resident in a worker process)
 import asyncio
 import logging
 import os
+import secrets
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -158,7 +159,8 @@ def require_token(authorization: Optional[str] = Header(None)) -> None:
     """Shared-secret check, skipped entirely when no API_TOKEN is configured."""
     if API_TOKEN is None:
         return
-    if authorization != f"Bearer {API_TOKEN}":
+    # compare_digest raises TypeError on a non-ASCII str, which a header can carry.
+    if not secrets.compare_digest((authorization or "").encode(), f"Bearer {API_TOKEN}".encode()):
         raise InvalidTokenError("Invalid or missing bearer token")
 
 

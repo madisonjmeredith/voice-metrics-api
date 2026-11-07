@@ -315,6 +315,15 @@ def test_bearer_token_when_configured(client, vowel_a, monkeypatch):
     assert allowed.status_code == 200
 
 
+def test_a_non_ascii_token_is_unauthorized(client, monkeypatch):
+    monkeypatch.setattr(main, "API_TOKEN", "s3cret")
+    with client(FakeAligner()) as c:
+        response = c.post(
+            "/lexicon", json={"words": ["hello"]}, headers={"Authorization": b"Bearer caf\xc3\xa9"}
+        )
+    assert error_of(response) == tuple(main.ERRORS[main.InvalidTokenError])
+
+
 @pytest.mark.parametrize(
     "aligner, analyzer, live, ready",
     [
