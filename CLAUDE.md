@@ -207,6 +207,34 @@ fixture in `tests/test_api.py` runs with `ALLOW_UNAUTHENTICATED=1`;
 `use_token` in `tests/conftest.py` switches a test, or the integration
 fixture, to bearer.
 
+**Input limits are enforced before the work they bound (#24).** FastAPI
+parses the whole multipart body before any dependency runs, `require_token`
+included, and Starlette spools file parts to disk past 1 MB with no size
+limit. So `BodyLimit` caps the body at `MAX_BODY_BYTES` as it arrives: a
+declared `Content-Length` over the cap is refused before anything is read, and
+a chunked body once it passes. A check in the endpoint would come after the
+disk was used, for callers without a token too. `UploadTooLargeError`
+subclasses Starlette's `HTTPException` because FastAPI turns anything else
+raised while it reads the body into a generic 400 ("There was an error
+parsing the body"); it's the one exception in `ERRORS` that does, so don't
+make it a plain `Exception`. ffmpeg gets `-t MAX_DURATION + 1`: it stops
+reading a long upload, and the extra second keeps a too-long clip decoding
+past `MAX_DURATION`, so `audio_s` on an `audio_too_long` line tops out near 61
+instead of the clip's real length. Measured under emulation on November 7,
+2026, #24's 4.4 MB, 2-hour silent WebM took 3.7 s on `main` with `/tmp`
+peaking at 228 MB, and 0.12 s with about 4 MB with these limits; a 20 MB upload is
+refused in 2 ms. `DECODE_TIMEOUT` (5 s) is a backstop: with `-t`, a 59 s clip
+decodes in 85 to 130 ms, and 5 s keeps the decode plus alignment's 20 s
+inside the client's 30 s HTTP timeout. `decode_timeout` is retryable because
+a starved host can trip it too. `MAX_TRANSCRIPT_LENGTH` bounds a transcript's
+size and refuses #24's 20,000-word one before anything runs, but it doesn't
+bound alignment time. A repeated short word aligns slowly: against a 59 s
+clip, 200 repeats of `it` aligned in 0.8 s, 250 in 6.9 s, and 333 ran past
+`ALIGN_TIMEOUT` and restarted the worker, while 741 real words failed
+(`alignment_failed`) in 1.6 s. That cliff sits inside the word count of an
+honest 60 s read, so no length cap can remove it; `ALIGN_TIMEOUT` and one
+restart are what bound it.
+
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
 or PostgreSQL setup to the image.
@@ -450,7 +478,8 @@ own exception type and a row in `ERRORS`, not an `HTTPException`; the
 contract test in `tests/test_api.py` pins both tables so a change there is
 deliberate. Keep the validation 422's `detail` a list and don't move a
 status: a client that predates `retryable` reads a 400 or 422 with a string
-`detail` as a verdict on the recording and anything else as retryable.
+`detail` as a verdict on the recording and anything else as retryable, so a
+new `retryable: false` code is a 400 or 422 too.
 `FRAMEWORK_ERROR_CODES` is a literal map, not a lookup on `HTTPStatus`,
 because Python 3.13 renamed some phrases (422 reads "Unprocessable Content")
 and the image runs 3.12, while the local `.venv` may be newer. Don't assert
@@ -491,6 +520,10 @@ The Praat workers match as well. The aligner is the one with over 1 GB of `VmRSS
 the aligner and `kill -STOP` the new process: `/health` reads `stalled` once
 `WARMUP_TIMEOUT` has passed since the restart, and the next call restarts it
 with `reason=warmup_timeout`.
+
+In the image ffmpeg lives in the conda environment, so a shell from `docker run --entrypoint sh`
+has no `ffmpeg` on its PATH. Sampling `/tmp` during a request with `docker exec <container> sh -c 'du -sk /tmp'`
+in a loop takes about 100 ms a sample, so a request that finishes faster can be missed entirely.
 
 `pytest.ini` already passes `-q`, so adding another hides the summary line.
 A stand-in from a test module makes a spawned worker import that module
