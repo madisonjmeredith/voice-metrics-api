@@ -18,6 +18,7 @@ import pytest
 
 from app import telemetry
 from app.aligner import Alignment, LoadedAligner, PhoneSpan, WordSpan
+from app.recognizer_pool import WHISPER_MODEL_DIR
 from app.worker import ACOUSTIC_DIR, DICTIONARY_PATH
 
 FS = 16000
@@ -176,3 +177,5 @@ def _has_mfa() -> bool:
 
 
 needs_mfa = pytest.mark.skipif(not _has_mfa(), reason="MFA is not installed")
+
+needs_whisper = pytest.mark.skipif(not WHISPER_MODEL_DIR.is_dir(), reason="The Whisper model is not installed")
