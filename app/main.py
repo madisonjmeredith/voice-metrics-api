@@ -43,6 +43,7 @@ MAX_DURATION = 60.0
 MIN_SCORED_PHONES = 3
 MAX_LEXICON_WORDS = 1000
 MAX_WORD_LENGTH = 200
+MAX_TRANSCRIPT_LENGTH = 4000
 SOURCE_URL = "https://github.com/madisonjmeredith/voice-metrics-api"
 
 
@@ -256,7 +257,9 @@ async def readiness_check():
 @app.post("/analyze", dependencies=[Depends(require_token)])
 async def analyze(
     audio: UploadFile = File(..., description="Audio in any format ffmpeg decodes"),
-    transcript: str = Form(..., description="The text that was read aloud"),
+    transcript: str = Form(
+        ..., max_length=MAX_TRANSCRIPT_LENGTH, description="The text that was read aloud"
+    ),
     include_phones: bool = Query(False, description="Return per-word and per-phone detail"),
 ):
     with tempfile.TemporaryDirectory() as tmp_dir:

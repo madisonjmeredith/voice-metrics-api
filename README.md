@@ -20,7 +20,7 @@ Multipart form.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `audio` | file | Anything ffmpeg decodes; browsers send WebM or MP4 |
-| `transcript` | string | The English text that was read aloud |
+| `transcript` | string | The English text that was read aloud, up to 4,000 characters |
 
 Query parameter `include_phones=1` adds `words` and `phones` to the response. Audio must be 1–60 seconds. Requests need `Authorization: Bearer <token>` with the server's `API_TOKEN` as the token. A server started with `ALLOW_UNAUTHENTICATED=1` takes them without one (see [Running it](#running-it)).
 

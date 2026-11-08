@@ -218,6 +218,24 @@ def test_missing_transcript(client, vowel_a):
     assert [error["loc"] for error in response.json()["detail"]] == [["body", "transcript"]]
 
 
+def test_a_transcript_over_the_cap_is_refused_before_decoding(client, vowel_a):
+    aligner = FakeAligner(vowel_alignment())
+    with client(aligner) as c:
+        response = post_analyze(c, vowel_a, transcript="a" * (main.MAX_TRANSCRIPT_LENGTH + 1))
+    assert error_of(response) == (422, "invalid_request", True)
+    assert [error["loc"] for error in response.json()["detail"]] == [["body", "transcript"]]
+    assert aligner.calls == []
+
+
+@needs_ffmpeg
+def test_a_transcript_at_the_cap_is_aligned(client, vowel_a):
+    aligner = FakeAligner(vowel_alignment())
+    with client(aligner) as c:
+        response = post_analyze(c, vowel_a, transcript="a" * main.MAX_TRANSCRIPT_LENGTH)
+    assert response.status_code == 200
+    assert len(aligner.calls[0][2]) == main.MAX_TRANSCRIPT_LENGTH
+
+
 @needs_ffmpeg
 @pytest.mark.parametrize(
     "error",
