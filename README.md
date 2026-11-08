@@ -263,6 +263,66 @@ Environment variables: `PORT` (8080), `API_TOKEN` (required unless `ALLOW_UNAUTH
 
 Each Praat process holds about 150 MB. Requests queue for a free one under a burst of long clips, and a host with CPUs to spare can raise `ANALYZER_WORKERS` to get through a burst faster.
 
+## Deploying to Cloud Run
+
+`cloudbuild.yaml` builds the `base` stage on amd64 in Cloud Build and pushes it to Artifact Registry. That skips the emulated build on Apple Silicon and the upload of a 0.85 GB image from your own machine. The steps assume a Google Cloud project with billing on and `gcloud` signed in to it, and they use `us-east4`. Swap in your own region and `PROJECT_ID`.
+
+1. Enable the APIs and create the image repository:
+
+   ```sh
+   gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com
+   gcloud artifacts repositories create voice-metrics-api --repository-format=docker --location=us-east4
+   ```
+
+2. Build and push the image, tagged with the commit it came from:
+
+   ```sh
+   gcloud builds submit --region us-east4 --config cloudbuild.yaml --substitutions=_TAG=$(git rev-parse --short HEAD) .
+   ```
+
+   `_REGION` and `_REPOSITORY` default to `us-east4` and `voice-metrics-api`, so pass them in `--substitutions` too if yours differ. The build takes about four minutes. `.gcloudignore` reuses `.dockerignore`, so the upload leaves out `.git` and `spike/`.
+
+3. Generate the token and store it. Piping it straight into Secret Manager keeps it off your screen and out of your shell history:
+
+   ```sh
+   openssl rand -hex 32 | tr -d '\n' | gcloud secrets create voice-metrics-api-token --replication-policy=user-managed --locations=us-east4 --data-file=-
+   ```
+
+   A client reads it back with `gcloud secrets versions access latest --secret voice-metrics-api-token`.
+
+4. Create the account the service runs as, with access to that one secret and nothing else:
+
+   ```sh
+   gcloud iam service-accounts create voice-metrics-api-run
+   gcloud secrets add-iam-policy-binding voice-metrics-api-token \
+     --member="serviceAccount:voice-metrics-api-run@PROJECT_ID.iam.gserviceaccount.com" \
+     --role=roles/secretmanager.secretAccessor
+   ```
+
+5. Deploy:
+
+   ```sh
+   gcloud run deploy voice-metrics-api --region us-east4 \
+     --image us-east4-docker.pkg.dev/PROJECT_ID/voice-metrics-api/voice-metrics-api:TAG \
+     --service-account voice-metrics-api-run@PROJECT_ID.iam.gserviceaccount.com \
+     --set-secrets API_TOKEN=voice-metrics-api-token:latest \
+     --allow-unauthenticated \
+     --cpu 2 --memory 4Gi --execution-environment gen2 --cpu-boost \
+     --timeout 60 --concurrency 8 --min-instances 0 --max-instances 2
+   ```
+
+`--allow-unauthenticated` lets requests through without a Google sign-in, so the bearer token is the only gate. That holds because the server won't start without `API_TOKEN`: a secret that didn't attach stops the revision from starting instead of opening `/analyze` to anyone.
+
+The rest of the flags come from these measurements on a 2-CPU instance in `us-east4`, with times taken end to end at the client:
+
+- Startup takes about 30 seconds, and 25.6 of them are the aligner loading. The server opens its port only once both pools are ready, so Cloud Run's default TCP startup probe already waits for the right thing.
+- Warm, a 5-second clip comes back in about half a second and a 24-second clip in about 1.2 seconds.
+- With eight requests in flight on one instance, every 5-second clip came back within 2.2 seconds and every 24-second clip within 4.5. The aligner takes one call at a time, but each call is short, so a queue on one instance costs far less than a second instance's startup. That's why `--concurrency` is 8.
+- Memory peaked around 1.5 GB of the 4 GiB with eight long clips in flight. The aligner holds over 1 GB and each Praat worker about 150 MB, and a worker the out-of-memory killer takes shows up as `exitcode=-9` in the logs.
+- After scaling to zero, the first request waits out a whole startup: 30.5 seconds end to end, 27.9 of them before the instance was ready. `--min-instances 1` removes that wait for the price of one instance running all the time, and with `--min-instances 0` an idle service costs nothing.
+
+`--timeout 60` leaves room for a startup plus the longest clip the service accepts.
+
 ## Logs
 
 The service writes to stderr: a line at startup with the auth mode, one line per request, and a line whenever the aligner or the Praat workers restart, finish loading, or fail to load. These came from a container whose aligner was killed while idle:
