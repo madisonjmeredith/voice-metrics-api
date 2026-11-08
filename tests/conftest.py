@@ -74,9 +74,9 @@ def write_wav(path: Path, signal: np.ndarray) -> Path:
     return path
 
 
-def vowel_alignment(labels=("AA1", "AH0", "AA1", "AH0"), oovs=()) -> Alignment:
+def vowel_alignment(labels=("AA1", "AH0", "AA1", "AH0"), oovs=(), word="ah") -> Alignment:
     """Phones spread evenly over the 1.5 s vowel_a clip, framed by silence."""
-    words = [WordSpan("<eps>", 0.0, 0.1), WordSpan("ah", 0.1, 1.4), WordSpan("<eps>", 1.4, 1.5)]
+    words = [WordSpan("<eps>", 0.0, 0.1), WordSpan(word, 0.1, 1.4), WordSpan("<eps>", 1.4, 1.5)]
     step = 1.3 / len(labels)
     phones = [PhoneSpan("sil", 0.0, 0.1)]
     for i, label in enumerate(labels):

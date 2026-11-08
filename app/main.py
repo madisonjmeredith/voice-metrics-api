@@ -3,7 +3,9 @@ voice-metrics-api: pitch and resonance scoring for a recording and its transcrip
 
 Flow: upload → ffmpeg → forced alignment (MFA, resident in a worker process)
 → Praat readings at each phone's midpoint (in a pool of worker processes)
-→ z-scores against per-phoneme population statistics → JSON.
+→ z-scores against per-phoneme population statistics → JSON. Recognition
+(Whisper, in a worker process of its own) runs beside the alignment and Praat,
+and its words are compared with the aligned ones.
 """
 
 import asyncio
@@ -31,9 +33,16 @@ from app.analyzer_pool import AnalyzerPool, AnalyzerUnavailable
 from app.converter import AudioDecodeError, DecodeTimeout, convert_to_wav, get_audio_duration
 from app.measurement import MeasuredPhone
 from app.scoring import score
-from app.pool import PoolState
+from app.pool import PoolState, retrieve
+from app.recognizer_pool import (
+    RecognitionTimeout,
+    RecognizerBusy,
+    RecognizerPool,
+    RecognizerUnavailable,
+)
 from app.request_log import RequestLog
 from app.telemetry import configure_logging, note, timed
+from app.transcript_match import normalize, transcript_words, word_coverage
 from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
 
 configure_logging()
@@ -75,6 +84,10 @@ def create_analyzer() -> AnalyzerPool:
     return AnalyzerPool()
 
 
+def create_recognizer() -> RecognizerPool:
+    return RecognizerPool()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -88,15 +101,20 @@ async def lifespan(app: FastAPI):
         logger.info("auth=bearer: /analyze and /lexicon need the API_TOKEN bearer token")
     app.state.aligner = create_aligner()
     app.state.analyzer = create_analyzer()
-    app.state.aligner.start()
-    app.state.analyzer.start()
-    logger.info("voice-metrics-api %s is loading the aligner and the Praat workers", __version__)
+    app.state.recognizer = create_recognizer()
+    pools = (app.state.aligner, app.state.analyzer, app.state.recognizer)
+    for pool in pools:
+        pool.start()
+    logger.info(
+        "voice-metrics-api %s is loading the aligner, the Praat workers, and the recognizer",
+        __version__,
+    )
     try:
-        await asyncio.gather(app.state.aligner.wait_ready(), app.state.analyzer.wait_ready())
+        await asyncio.gather(*(pool.wait_ready() for pool in pools))
         yield
     finally:
-        app.state.aligner.shutdown()
-        app.state.analyzer.shutdown()
+        for pool in pools:
+            pool.shutdown()
 
 
 class BodyLimit:
@@ -194,6 +212,12 @@ ERRORS: dict[type[Exception], ErrorKind] = {
 
 FRAMEWORK_ERROR_CODES = {400: "invalid_request", 404: "not_found", 405: "method_not_allowed"}
 
+RECOGNITION_FAILURES: dict[type[Exception], str] = {
+    RecognizerBusy: "recognizer_busy",
+    RecognitionTimeout: "recognition_timeout",
+    RecognizerUnavailable: "recognizer_unavailable",
+}
+
 
 def _error_response(status: int, detail, code: str, retryable: bool, headers=None) -> JSONResponse:
     note(code=code)
@@ -279,10 +303,24 @@ def _save_as_wav(upload: UploadFile, tmp_path: Path) -> tuple[Path, float]:
     return wav_path, get_audio_duration(wav_path)
 
 
+async def _recognition(task: asyncio.Task, alignment: Alignment) -> Optional[dict]:
+    """What the recognizer heard and how much of the transcript that covers; None if it couldn't say."""
+    try:
+        text = await task
+    except tuple(RECOGNITION_FAILURES) as exc:
+        note(recognition=RECOGNITION_FAILURES[type(exc)])
+        return None
+    words = transcript_words(alignment)
+    figures = {"word_coverage": _round(word_coverage(words, normalize(text)), 3), "compared_words": len(words)}
+    note(recognition="ok", **figures)
+    return {"text": text, **figures}
+
+
 def _probe(passes: Callable[[PoolState], bool], verdicts: tuple[str, str]) -> JSONResponse:
-    states = {"aligner": app.state.aligner.state, "analyzer": app.state.analyzer.state}
+    deciding = {"aligner": app.state.aligner.state, "analyzer": app.state.analyzer.state}
+    states = {**deciding, "recognizer": app.state.recognizer.state}
     note(**states)
-    ok = all(passes(state) for state in states.values())
+    ok = all(passes(state) for state in deciding.values())
     return JSONResponse(
         status_code=200 if ok else 503,
         content={"version": __version__, "status": verdicts[0] if ok else verdicts[1], **states},
@@ -291,13 +329,13 @@ def _probe(passes: Callable[[PoolState], bool], verdicts: tuple[str, str]) -> JS
 
 @app.get("/health")
 async def health_check():
-    """Liveness: 503 while either pool is stalled or down."""
+    """Liveness: 503 while the aligner or the analyzer is stalled or down."""
     return _probe(lambda state: state.live, ("healthy", "unhealthy"))
 
 
 @app.get("/ready")
 async def readiness_check():
-    """Readiness: 200 only once both pools have loaded."""
+    """Readiness: 200 only once the aligner and the analyzer have loaded."""
     return _probe(lambda state: state is PoolState.READY, ("ready", "not_ready"))
 
 
@@ -318,19 +356,24 @@ async def analyze(
         if duration > MAX_DURATION:
             raise AudioTooLongError(f"Audio too long. Keep it under {MAX_DURATION:.0f} seconds.")
 
-        alignment = await app.state.aligner.align(wav_path, duration, transcript)
-        note(words=len(alignment.speech_words), oovs=len(alignment.oovs))
-        phones = await app.state.analyzer.measure(wav_path, alignment)
-        aggregates = score(phones)
-
-    if aggregates["readings"]["balanced"] < MIN_SCORED_PHONES:
-        raise TooLittleSpeechError(
-            "Too little scorable speech. Speak clearly and make sure the transcript matches."
-        )
-    if aggregates["readings"]["pitch"] < MIN_SCORED_PHONES:
-        raise TooLittleVoicingError(
-            "Too little voiced speech to measure pitch. Check the microphone and speak aloud."
-        )
+        recognizing = asyncio.create_task(app.state.recognizer.recognize(wav_path))
+        recognizing.add_done_callback(retrieve)
+        try:
+            alignment = await app.state.aligner.align(wav_path, duration, transcript)
+            note(words=len(alignment.speech_words), oovs=len(alignment.oovs))
+            phones = await app.state.analyzer.measure(wav_path, alignment)
+            aggregates = score(phones)
+            if aggregates["readings"]["balanced"] < MIN_SCORED_PHONES:
+                raise TooLittleSpeechError(
+                    "Too little scorable speech. Speak clearly and make sure the transcript matches."
+                )
+            if aggregates["readings"]["pitch"] < MIN_SCORED_PHONES:
+                raise TooLittleVoicingError(
+                    "Too little voiced speech to measure pitch. Check the microphone and speak aloud."
+                )
+            recognition = await _recognition(recognizing, alignment)
+        finally:
+            recognizing.cancel()
 
     result = {
         "version": __version__,
@@ -341,6 +384,7 @@ async def analyze(
         "word_count": len(alignment.speech_words),
         "oovs": alignment.oovs,
         "speech_coverage": round(alignment.speech_coverage(duration), 3),
+        "recognition": recognition,
         "pitch": {**_round_stats(aggregates["pitch"]), "unit": "Hz"},
         "resonance": _round_stats(aggregates["resonance"], 4),
         "formants": {

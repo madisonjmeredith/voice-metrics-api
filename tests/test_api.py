@@ -6,6 +6,7 @@ enough to exercise validation, the response shape and the error mapping
 without a conda environment.
 """
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -15,27 +16,24 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app import __version__
-from app.aligner import Alignment, AlignmentError, EmptyTranscriptError, Tokenized
+from app.aligner import OOV_LABEL, Alignment, AlignmentError, EmptyTranscriptError, Tokenized
 import app.analyzer_pool as analyzer_pool
 from app.analyzer_pool import AnalyzerUnavailable
 from app.converter import AudioDecodeError, DecodeTimeout
 from app.measurement import MeasuredPhone
 from app.pool import PoolState
+from app.recognizer_pool import RecognitionTimeout
 from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
 from tests.conftest import needs_ffmpeg, post_analyze, use_token, vowel_alignment
 
 NAME = "Quillonae"
 
 
-class FakeAligner:
+class FakePool:
     state = PoolState.READY
 
-    def __init__(self, result=None, error=None, lexicon=None, load_error=None):
-        self.result = result
-        self.error = error
-        self.lexicon = lexicon or {}
+    def __init__(self, load_error=None):
         self.load_error = load_error
-        self.calls = []
         self.started = False
         self.stopped = False
 
@@ -49,7 +47,17 @@ class FakeAligner:
     def shutdown(self):
         self.stopped = True
 
+
+class FakeAligner(FakePool):
+    def __init__(self, result=None, error=None, lexicon=None, load_error=None):
+        super().__init__(load_error)
+        self.result = result
+        self.error = error
+        self.lexicon = lexicon or {}
+        self.calls = []
+
     async def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
+        await asyncio.sleep(0)
         self.calls.append((wav_path.name, duration, transcript))
         if self.error is not None:
             raise self.error
@@ -61,24 +69,12 @@ class FakeAligner:
         return [Tokenized(*self.lexicon.get(text, (text.lower(), []))) for text in texts]
 
 
-class InlineAnalyzer:
+class InlineAnalyzer(FakePool):
     """Real Praat readings, taken in the test process so no test spawns a worker."""
 
-    state = PoolState.READY
-
     def __init__(self, error=None):
+        super().__init__()
         self.error = error
-        self.started = False
-        self.stopped = False
-
-    def start(self):
-        self.started = True
-
-    async def wait_ready(self):
-        pass
-
-    def shutdown(self):
-        self.stopped = True
 
     async def measure(self, wav_path: Path, alignment: Alignment) -> list[MeasuredPhone]:
         if self.error is not None:
@@ -86,14 +82,37 @@ class InlineAnalyzer:
         return analyzer_pool._measure(wav_path, alignment)
 
 
+class FakeRecognizer(FakePool):
+    def __init__(self, text="ah", error=None, hold=False, load_error=None):
+        super().__init__(load_error)
+        self.text = text
+        self.error = error
+        self.hold = hold
+        self.calls = []
+        self.cancelled = False
+
+    async def recognize(self, wav_path: Path) -> str:
+        self.calls.append(wav_path.name)
+        try:
+            if self.hold:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if self.error is not None:
+            raise self.error
+        return self.text
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.delenv("API_TOKEN", raising=False)
     monkeypatch.setenv("ALLOW_UNAUTHENTICATED", "1")
 
-    def make(aligner, analyzer=None, **kwargs):
+    def make(aligner, analyzer=None, recognizer=None, **kwargs):
         monkeypatch.setattr(main, "create_aligner", lambda: aligner)
         monkeypatch.setattr(main, "create_analyzer", lambda: analyzer or InlineAnalyzer())
+        monkeypatch.setattr(main, "create_recognizer", lambda: recognizer or FakeRecognizer())
         return TestClient(main.app, **kwargs)
 
     return make
@@ -129,6 +148,7 @@ def test_analyze_returns_prosody_compatible_aggregates(client, vowel_a):
     assert set(body["resonance"]) == {"mean", "median", "stdev", "balanced"}
     assert 0.0 <= body["resonance"]["mean"] <= 1.0
     assert set(body["formants"]) == {"f1", "f2", "f3", "unit"}
+    assert body["recognition"] == {"text": "ah", "word_coverage": 1.0, "compared_words": 1}
     assert "phones" not in body and "words" not in body
     assert aligner.calls[0][2] == "ah"
 
@@ -154,6 +174,55 @@ def test_oovs_pass_through(client, vowel_a):
     with client(FakeAligner(vowel_alignment(oovs=["zorblax"]))) as c:
         body = post_analyze(c, vowel_a).json()
     assert body["oovs"] == ["zorblax"]
+
+
+@needs_ffmpeg
+def test_word_coverage_counts_only_the_words_that_were_heard(client, vowel_a):
+    aligner = FakeAligner(vowel_alignment())
+    with client(aligner, recognizer=FakeRecognizer("Hello there.")) as c:
+        body = post_analyze(c, vowel_a).json()
+    assert body["recognition"] == {"text": "Hello there.", "word_coverage": 0.0, "compared_words": 1}
+
+
+@needs_ffmpeg
+def test_a_transcript_of_only_oov_words_has_no_word_coverage(client, vowel_a):
+    with client(FakeAligner(vowel_alignment(word=OOV_LABEL, oovs=["zorblax"]))) as c:
+        body = post_analyze(c, vowel_a).json()
+    assert body["recognition"] == {"text": "ah", "word_coverage": None, "compared_words": 0}
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("error, status", main.RECOGNITION_FAILURES.items())
+def test_a_recognizer_that_cannot_answer_leaves_only_the_recognition_null(client, vowel_a, logs, error, status):
+    with client(FakeAligner(vowel_alignment()), recognizer=FakeRecognizer(error=error("detail"))) as c:
+        response = post_analyze(c, vowel_a)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["recognition"] is None
+    assert body["pitch"]["mean"] is not None
+    [line] = request_lines(logs)
+    assert line.levelno == logging.INFO
+    assert f" recognition={status}" in line.getMessage()
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    "aligner, audio, code",
+    [
+        (FakeAligner(error=AlignmentError("beam too narrow")), "vowel_a", "alignment_failed"),
+        (FakeAligner(vowel_alignment()), "silence", "too_little_speech"),
+    ],
+    ids=["alignment", "refusal"],
+)
+def test_a_take_that_fails_drops_its_recognition(client, request, aligner, audio, code):
+    recognizer = FakeRecognizer(hold=True)
+    with client(aligner, recognizer=recognizer) as c:
+        response = post_analyze(c, request.getfixturevalue(audio))
+
+    assert response.json()["code"] == code
+    assert recognizer.calls == ["audio.wav"]
+    assert recognizer.cancelled
 
 
 def error_of(response) -> tuple:
@@ -185,6 +254,13 @@ def test_error_codes_are_the_published_contract():
     }
     codes = [kind.code for kind in main.ERRORS.values()]
     assert len(set(codes)) == len(codes)
+    assert {error.__name__: status for error, status in main.RECOGNITION_FAILURES.items()} == {
+        "RecognizerBusy": "recognizer_busy",
+        "RecognitionTimeout": "recognition_timeout",
+        "RecognizerUnavailable": "recognizer_unavailable",
+    }
+    framework = set(main.FRAMEWORK_ERROR_CODES.values())
+    assert set(main.RECOGNITION_FAILURES.values()).isdisjoint({*codes, *framework})
 
 
 @needs_ffmpeg
@@ -406,11 +482,11 @@ def test_it_refuses_to_start_unless_the_auth_mode_is_clear(client, monkeypatch, 
     monkeypatch.delenv("ALLOW_UNAUTHENTICATED")
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    aligner, analyzer = FakeAligner(), InlineAnalyzer()
+    aligner, analyzer, recognizer = FakeAligner(), InlineAnalyzer(), FakeRecognizer()
     with pytest.raises(main.ConfigError):
-        with client(aligner, analyzer):
+        with client(aligner, analyzer, recognizer):
             pass
-    assert not aligner.started and not analyzer.started
+    assert not aligner.started and not analyzer.started and not recognizer.started
     assert [r.levelno for r in logs.records if r.name == "app.main"] == [logging.ERROR]
     assert "s3cret" not in logs.text
 
@@ -440,7 +516,7 @@ def test_startup_logs_the_auth_mode(client, monkeypatch, logs, token, level, mod
         ("ready", "down", 503, 503),
     ],
 )
-def test_the_probes_answer_for_both_pools(client, aligner, analyzer, live, ready):
+def test_the_probes_answer_for_the_aligner_and_the_analyzer(client, aligner, analyzer, live, ready):
     fake, inline = FakeAligner(), InlineAnalyzer()
     with client(fake, inline) as c:
         fake.state, inline.state = PoolState(aligner), PoolState(analyzer)
@@ -449,6 +525,17 @@ def test_the_probes_answer_for_both_pools(client, aligner, analyzer, live, ready
     states = {"aligner": aligner, "analyzer": analyzer}
     assert (health.status_code, readiness.status_code) == (live, ready)
     assert health.json().items() >= states.items() and readiness.json().items() >= states.items()
+
+
+@pytest.mark.parametrize("state", list(PoolState))
+def test_the_recognizer_is_reported_but_never_fails_a_probe(client, state):
+    recognizer = FakeRecognizer()
+    with client(FakeAligner(), recognizer=recognizer) as c:
+        recognizer.state = state
+        health, readiness = c.get("/health"), c.get("/ready")
+
+    assert (health.status_code, readiness.status_code) == (200, 200)
+    assert health.json()["recognizer"] == readiness.json()["recognizer"] == state
 
 
 def test_a_probe_body_names_its_verdict(client):
@@ -460,7 +547,7 @@ def test_a_probe_body_names_its_verdict(client):
     assert (passing, failing) == (["healthy", "ready"], ["unhealthy", "not_ready"])
 
 
-def test_a_failing_probe_is_logged_with_both_states(client, logs):
+def test_a_failing_probe_is_logged_with_every_state(client, logs):
     fake = FakeAligner()
     with client(fake) as c:
         fake.state = PoolState.WARMING
@@ -468,7 +555,9 @@ def test_a_failing_probe_is_logged_with_both_states(client, logs):
         c.get("/ready")
     [line] = request_lines(logs)
     assert line.levelno == logging.WARNING
-    assert re.fullmatch(r"GET /ready 503 total_ms=\d+ aligner=warming analyzer=ready", line.getMessage())
+    assert re.fullmatch(
+        r"GET /ready 503 total_ms=\d+ aligner=warming analyzer=ready recognizer=ready", line.getMessage()
+    )
 
 
 def test_every_endpoint_reports_the_one_version(client):
@@ -560,7 +649,9 @@ def test_a_request_logs_one_line_with_its_stages(client, vowel_a, logs):
     method, path, status, *fields = line.getMessage().split()
     assert (method, path, status) == ("POST", "/analyze", "200")
     assert [field.split("=")[0] for field in fields[:2]] == ["total_ms", "decode_ms"]
-    assert fields[2:] == ["audio_s=1.5", "words=1", "oovs=0"]
+    assert fields[2:] == [
+        "audio_s=1.5", "words=1", "oovs=0", "recognition=ok", "word_coverage=1.0", "compared_words=1"
+    ]
 
 
 @needs_ffmpeg
@@ -620,7 +711,7 @@ def test_a_caller_request_id_is_kept_when_it_is_safe(client, logs, sent, kept):
 def test_no_log_line_carries_request_content(client, vowel_a, logs):
     word = NAME.lower()
     aligner = FakeAligner(vowel_alignment(oovs=[word]), lexicon={NAME: (word, [word])})
-    with client(aligner) as c:
+    with client(aligner, recognizer=FakeRecognizer(f"Hello, {NAME}.")) as c:
         with open(vowel_a, "rb") as f:
             scored = c.post(
                 "/analyze",
@@ -631,16 +722,29 @@ def test_no_log_line_carries_request_content(client, vowel_a, logs):
         too_long = c.post("/lexicon", json={"words": [NAME * 40]})
     with client(FakeAligner(error=AlignmentError(f"could not align {word}"))) as c:
         refused = post_analyze(c, vowel_a, transcript=NAME)
+    unheard = FakeRecognizer(error=RecognitionTimeout(f"stopped while hearing {word}"))
+    with client(FakeAligner(vowel_alignment()), recognizer=unheard) as c:
+        degraded = post_analyze(c, vowel_a, transcript=NAME)
 
-    assert [r.status_code for r in (scored, checked, too_long, refused)] == [200, 200, 422, 422]
+    responses = (scored, checked, too_long, refused, degraded)
+    assert [r.status_code for r in responses] == [200, 200, 422, 422, 200]
     assert NAME in str(too_long.json()["detail"]) and word in refused.json()["detail"]
-    assert len(request_lines(logs)) == 4
+    assert NAME in scored.json()["recognition"]["text"]
+    assert len(request_lines(logs)) == 5
     assert word not in logs.text.lower()
 
 
-def test_a_failed_load_stops_both_pools(client):
-    aligner, analyzer = FakeAligner(load_error=TimeoutError()), InlineAnalyzer()
+@pytest.mark.parametrize(
+    "aligner, recognizer",
+    [
+        (FakeAligner(load_error=TimeoutError()), FakeRecognizer()),
+        (FakeAligner(), FakeRecognizer(load_error=TimeoutError())),
+    ],
+    ids=["aligner", "recognizer"],
+)
+def test_a_failed_load_stops_every_pool(client, aligner, recognizer):
+    analyzer = InlineAnalyzer()
     with pytest.raises(TimeoutError):
-        with client(aligner, analyzer):
+        with client(aligner, analyzer, recognizer):
             pass
-    assert aligner.stopped and analyzer.stopped
+    assert aligner.stopped and analyzer.stopped and recognizer.stopped
