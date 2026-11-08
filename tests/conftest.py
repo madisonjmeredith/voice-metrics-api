@@ -91,8 +91,8 @@ async def noted(call):
         return await call, fields
 
 
-def pool_lines(caplog, level: int = logging.WARNING) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.name == "app.pool" and r.levelno == level]
+def pool_lines(caplog, level: int = logging.WARNING, logger: str = "app.pool") -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == logger and r.levelno == level]
 
 
 def eventually(check, timeout: float = 5.0) -> None:

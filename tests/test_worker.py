@@ -6,6 +6,7 @@ by name from there.
 """
 
 import asyncio
+import gc
 import logging
 import re
 import time
@@ -37,6 +38,8 @@ def _fake_align(wav_path: Path, duration: float, transcript: str) -> str:
         time.sleep(SLOW)
     if transcript == "brief":
         time.sleep(BRIEF)
+    if transcript.startswith("touch:"):
+        Path(transcript.removeprefix("touch:")).touch()
     return transcript
 
 
@@ -136,6 +139,57 @@ def test_the_timeout_starts_when_the_worker_picks_up_the_call(pool):
     assert pool.restarts == 0
     assert waited_less["aligner_wait_ms"] < SLOW * 1000 <= waited_more["aligner_wait_ms"]
     assert waited_less["aligner_ms"] >= SLOW * 1000 and waited_more["aligner_ms"] >= SLOW * 1000
+
+
+def test_a_caller_that_leaves_mid_run_keeps_the_turn_until_the_worker_is_free(pool):
+    async def scenario():
+        pool.timeout = SLOW + 1.0
+        left = asyncio.create_task(pool.align(WAV, 0.0, "slow"))
+        await asyncio.sleep(0.3)
+        left.cancel()
+        return left, await noted(pool.align(WAV, 0.0, "brief"))
+
+    left, (result, fields) = asyncio.run(scenario())
+    assert left.cancelled()
+    assert result == "brief"
+    assert pool.restarts == 0
+    assert fields["aligner_wait_ms"] >= (SLOW - 0.3) * 1000 * 0.8
+    assert fields["aligner_ms"] < (BRIEF + 0.5) * 1000
+
+
+def test_a_hung_call_its_caller_left_still_restarts_the_worker(pool, caplog):
+    async def scenario():
+        pool.timeout = 0.5
+        left = asyncio.create_task(pool.align(WAV, 0.0, "hang"))
+        await asyncio.sleep(0.1)
+        left.cancel()
+        pool.timeout = SPAWN_TIMEOUT
+        await asyncio.sleep(1.0)
+        return await pool.align(WAV, 0.0, "ready")
+
+    assert asyncio.run(scenario()) == "ready"
+    gc.collect()
+    assert pool.restarts == 1
+    [line] = pool_lines(caplog)
+    assert line.startswith("aligner restart reason=alignment_timeout ")
+    assert pool_lines(caplog, logging.ERROR, logger="asyncio") == []
+
+
+def test_a_caller_that_leaves_while_queued_never_reaches_the_worker(pool, tmp_path):
+    marker = tmp_path / "reached"
+
+    async def scenario():
+        ahead = asyncio.create_task(pool.align(WAV, 0.0, "brief"))
+        await asyncio.sleep(0.05)
+        left = asyncio.create_task(pool.align(WAV, 0.0, f"touch:{marker}"))
+        await asyncio.sleep(0.05)
+        left.cancel()
+        await ahead
+        return await pool.align(WAV, 0.0, "ready")
+
+    assert asyncio.run(scenario()) == "ready"
+    assert not marker.exists()
+    assert pool.restarts == 0
 
 
 @pytest.mark.parametrize(
