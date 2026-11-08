@@ -19,7 +19,8 @@ from typing import NamedTuple, Optional
 
 # Labels MFA emits for things that are not speech: praatio gaps, MFA's silence
 # word and phone, and the out-of-vocabulary word and phone.
-NON_SPEECH_LABELS = frozenset({"", "<eps>", "sil", "sp", "spn", "<unk>"})
+OOV_LABEL = "<unk>"
+NON_SPEECH_LABELS = frozenset({"", "<eps>", "sil", "sp", "spn", OOV_LABEL})
 
 DEFAULT_BEAM = 10
 DEFAULT_RETRY_BEAM = 40

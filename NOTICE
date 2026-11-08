@@ -37,5 +37,10 @@ Third-party components
 - CMU Pronouncing Dictionary (BSD-2-Clause), https://github.com/cmusphinx/cmudict
   dictionary/cmudict.dict is a subset of its entries, reformatted. Its
   copyright notice and license are in dictionary/LICENSE.cmudict.
+- Whisper's English text normalizer, Copyright (c) 2022 OpenAI (MIT),
+  https://github.com/openai/whisper
+  app/normalizers/ is a verbatim copy of whisper/normalizers/ at commit
+  86098128c0b4f24f0e2aa2994de830614b474227. Its license is in
+  app/normalizers/LICENSE.
 
 CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
