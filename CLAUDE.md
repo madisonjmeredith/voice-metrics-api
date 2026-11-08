@@ -6,7 +6,8 @@ user-facing document; this file covers why the code looks the way it does.
 ## What this is
 
 A FastAPI service that scores a recording plus its transcript for pitch and
-resonance, called from a queued job in the Laravel app that consumes it. It
+resonance, and reports how much of the transcript a recognizer heard, called
+from a queued job in the Laravel app that consumes it. It
 replaces that app's older in-repo service, which ignored the transcript.
 
 The sibling `~/Web/personal/formantry` is a public acoustic-analysis service
@@ -18,8 +19,9 @@ synthesizer). Nothing from this repo goes back the other way. Ever.
 Source is in `app/`, tests in `tests/`. Non-obvious parts:
 
 - `app/reference/` is copied verbatim from the reference project; don't edit it.
+- `app/normalizers/` is Whisper's English text normalizer, copied verbatim at the commit `NOTICE` names; don't edit it.
 - `app/warmup.wav` is aligned at startup so the model loads before traffic.
-- `app/pool.py` holds what both worker pools share (`WarmPool`): warm-up, restart, their log lines, and the probes' `state`.
+- `app/pool.py` holds what the worker pools share: `WarmPool` (warm-up, restart, their log lines, and the probes' `state`) and `SerialPool` (one worker whose calls queue in the API process), which the aligner and the recognizer build on.
 - `app/telemetry.py` is imported by the worker processes, so it stays standard library only; the Starlette middleware is in `app/request_log.py`.
 - `dictionary/cmudict.dict` is generated (see below); `dictionary/LICENSE.cmudict` stays beside it; `dictionary/custom.dict` is hand-written and appended last.
 - `LICENSE`, `NOTICE`, and `dictionary/LICENSE.cmudict` ship in the image; `tests/test_licenses.py` fails in the image if one is left out.
@@ -27,6 +29,7 @@ Source is in `app/`, tests in `tests/`. Non-obvious parts:
 - `tests/textgrids.py` is used only to turn checked-in alignments into fixtures.
 - `tests/test_aligner.py` and `tests/test_worker.py` run without MFA, over stand-ins.
 - `tests/test_analyzer_pool.py` runs without MFA too, over real Praat and a stand-in.
+- `tests/test_recognizer_pool.py` runs without the Whisper model over stand-ins, except one test that needs the model.
 - `spike/` holds scripts that aren't shipped: the timing script and the generators for the parity numbers, `cmudict.dict`, and the lockfiles.
 
 ## Decisions that were measured or negotiated, not defaulted
@@ -107,6 +110,7 @@ current one. `cancel_futures=True` raced the kill. Measured on Python 3.12
 with six calls queued in the executor, over 10 trials, 39 of 60 calls
 surfaced as `asyncio.CancelledError`, which no handler maps to a status;
 without the flag all 60 got `BrokenProcessPool`. Do not add the flag back.
+The recognizer queues through the same `SerialPool`; what a cancelled call does is under the recognition entry below.
 `tests/test_worker.py` covers these rules without MFA by patching `_init`,
 `_align`, and `_tokenize` to stand-ins that are importable from the spawned
 worker, and by pointing `WARMUP_TRANSCRIPT` at a slow or hanging stand-in.
@@ -143,9 +147,10 @@ already warm and leave another cold (about 0.35 s on its first request).
 
 **`/health` is liveness and `/ready` is readiness (#20).** `/health` used to be
 200 whatever the aligner did: in #18's outage 61 of 68 samples said `warming`
-with a 200 while every `/analyze` failed. It now answers 503 only when a pool
-is `stalled` (loading past `WARMUP_TIMEOUT`) or `down` (a failed load or a dead
-worker), the states a pool leaves only when a call arrives and restarts it, so
+with a 200 while every `/analyze` failed. It now answers 503 only when the
+aligner or the analyzer is `stalled` (loading past `WARMUP_TIMEOUT`) or `down`
+(a failed load or a dead worker); the recognizer is reported but never decides
+(see the recognition entry), the states a pool leaves only when a call arrives and restarts it, so
 a router that stopped sending traffic would leave it there. `warming` stays 200
 so a normal reload can't get an instance replaced. The bound reuses
 `WARMUP_TIMEOUT` because a call already restarts a reload past it, and
@@ -161,7 +166,8 @@ alive. On a single instance, a router that honors `/ready` turns a request
 that would have waited out a reload into a router 503; the README says so.
 
 **Logs carry no request content (#20).** A transcript can include someone's
-first name, so no line has the transcript or its words, OOV words (only their
+first name, so no line has the transcript or its words, what the recognizer
+heard, OOV words (only their
 count), the upload's filename, an error's `detail` (ffmpeg's stderr, kalpy's
 message, validation input), or the client IP; the `code` names the error.
 `test_no_log_line_carries_request_content` sends a name through each path. The
@@ -234,6 +240,77 @@ clip, 200 repeats of `it` aligned in 0.8 s, 250 in 6.9 s, and 333 ran past
 (`alignment_failed`) in 1.6 s. That cliff sits inside the word count of an
 honest 60 s read, so no length cap can remove it; `ALIGN_TIMEOUT` and one
 restart are what bound it.
+
+**Recognition reports how much of the transcript was heard (#25).** Forced
+alignment places every in-vocabulary word whatever the audio holds, so a fluent
+read of other words aligned like a real one (#3: `hello.wav` against "Can you
+hear me okay?" at 0.731 `speech_coverage`). Whisper tiny.en (faster-whisper,
+int8) transcribes the clip in its own worker beside the alignment and Praat.
+`recognition.word_coverage` is the share of the aligned words, `<unk>` left
+out, that appear in order in what it heard: a longest common subsequence over
+Whisper's English normalizer on both sides. Insertions cost nothing by design,
+so a stumble, a repeat, or a trailing hallucination doesn't count against a
+genuine read; extra speech past the transcript already lowers
+`speech_coverage`. The transcript side is normalized a run at a time between
+`<unk>`s so a number can't join across one.
+
+Measured with `spike/recognition.py` under emulation on November 7, 2026, over
+58 genuine takes that get a 200 (the reference project's samples and the
+client's takes) and 57 pairs of one take's audio with another's transcript:
+tiny.en and base.en both put the lowest genuine read at 0.667 (a tongue twister
+Whisper corrected toward "The quick...") and the next at 0.800, and the highest
+mismatched pair at 0.500 (two near-identical greetings). base.en left 5 genuine
+reads under 0.9 to tiny.en's 10 but takes about 1.8 times as long. Vosk small
+left 29 under 0.9 and one at 0.208. Two takes that pass every floor read 0 on
+all three: a near-silent one (-51 dB) and full-scale non-speech at 0.93
+`speech_coverage`. 54 of the 57 mismatched pairs clear the client's 0.3
+`speech_coverage` floor. Replayed through the built service, 114 of 115 figures
+matched the spike exactly and one moved by 0.015 (#28). A hosted recognizer was
+rejected because each take's audio and a transcript that often carries a first
+name would leave the server. base.en is the upgrade if a real threshold turns
+out tight.
+
+Whisper never gets the transcript as a prompt, which would bias it toward
+hearing it. Decoding is temperature 0 with no fallback loop, which bounds its
+time, and `condition_on_previous_text=False`. The audio goes in as samples
+(`read_samples` in `converter.py`) because faster-whisper 1.2.1 opens a path
+with an `av.open()` argument PyAV 19 dropped.
+
+Rosetta has no AVX, so CTranslate2 runs about 15 times slower under emulation:
+a 58.8 s clip took 13.9 s emulated (18 s with the aligner and Praat busy) and
+0.93 s on native arm64. Native x86 is unmeasured. `RECOGNIZE_TIMEOUT` is 10 s,
+used twice like `ALIGN_TIMEOUT`, so recognition's worst case sits inside
+alignment's 20 s plus Praat. Under emulation a clip past about 35 s runs out the
+clock and restarts the recognizer; `RECOGNIZE_TIMEOUT=30` gets the figure
+locally (0.97 for the 58.8 s clip, 15.2 s end to end). `RECOGNIZER_THREADS`
+defaults to 2, not the CPU count, for `ANALYZER_WORKERS`'s reason. The worker
+holds 210 to 330 MB and loads in about 4 s.
+
+When the recognizer is busy, times out, or has lost its worker, `/analyze`
+still answers 200 with `recognition: null` and the request line names the
+reason. Those strings live in `RECOGNITION_FAILURES`, apart from `ERRORS`:
+they aren't refusals and get no error body, and the contract test keeps them
+from colliding with an error code. An unexpected exception from the worker is
+still a 500. The probes report `recognizer` but only the aligner and the
+analyzer decide the verdict, so an advisory figure can't get an instance
+replaced; the next call restarts a down recognizer. A recognizer that won't
+load at boot exits like the other pools, since that's a broken image. Under
+emulation a burst of six 58.8 s takes all answered 200 within 18.6 s with no
+aligner restart and `/health` under 25 ms (their recognitions came back null).
+
+`/analyze` cancels recognition whenever alignment fails or a refusal fires.
+`SerialPool` runs each call's run half in a task under `asyncio.shield`, so a
+caller cancelled mid-run leaves the call timed and holding the turn until the
+worker is free, and one cancelled while queued gives up its turn without
+reaching the worker. Without the shield the cancel released `_turn` and the
+next call queued in the executor behind the abandoned one, which #18 rules
+out. `retrieve` marks the abandoned run's exception seen because Python 3.14's
+`shield` no longer does (3.12's does). Tests in `tests/test_worker.py` fail
+without either.
+
+MFA's `transcription.models` imports faster-whisper whenever it's installed,
+so the aligner process maps CTranslate2 too. It costs nothing measurable: the
+aligner held 1,350 MB with it and 1,360 MB without, and loaded as fast.
 
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
@@ -466,8 +543,13 @@ next bump reports it, so the tag would mark only the first of them. Nothing
 bumps or checks the version automatically: whether a change can move a score
 is a judgment call, and the suite runs in an image without `.git`.
 
-`/health` and `/ready` return `{version, status, aligner, analyzer}` at 200
-and 503. A probe's 503 is an answer, not an error, so it doesn't take the
+`/analyze`'s `recognition` is `{text, word_coverage, compared_words}`, or null
+when the recognizer couldn't answer; `word_coverage` is null when every word is
+OOV. A null means unmeasured. Treat its names and shapes like the client's
+fields once something reads them.
+
+`/health` and `/ready` return `{version, status, aligner, analyzer, recognizer}`
+at 200 and 503. A probe's 503 is an answer, not an error, so it doesn't take the
 error shape below. The client calls neither.
 
 Every error body is `{detail, code, retryable}`, built from `ERRORS` and
@@ -508,14 +590,16 @@ same response's `include_phones=1` phones (those with a resonance that aren't
 outliers) and check they match it.
 
 A container started by hand from the image (load tests, the worker-loss reproduction below)
-exits with code 3 unless it gets `-e ALLOW_UNAUTHENTICATED=1` or `-e API_TOKEN=...`.
+exits with code 3 unless it gets `-e ALLOW_UNAUTHENTICATED=1` or `-e API_TOKEN=...`. Under
+emulation, give it `-e RECOGNIZE_TIMEOUT=30` too if long clips need a `recognition` figure.
 
 To reproduce a worker loss in a running container (#18), kill the aligner process
 with `docker exec <container> sh -c 'kill -9 <pid>'`: the image has no `kill` or
 `pkill` binary. Find the pid by grepping each `/proc/<pid>/cmdline` for `spawn_main`,
 skipping the scanning shell's own `$$`, whose command line contains that string too.
-The Praat workers match as well. The aligner is the one with over 1 GB of `VmRSS` in
-`/proc/<pid>/status`; a Praat worker holds about 150 MB. The restart line in
+The Praat workers and the recognizer match as well. The aligner is the one with over 1 GB of `VmRSS` in
+`/proc/<pid>/status`; a Praat worker holds about 150 MB. The recognizer maps `ctranslate2` in
+`/proc/<pid>/maps` and not `libkaldi`; the aligner maps both. The restart line in
 `docker logs` carries the exit code. To reproduce a hung reload (#20), restart
 the aligner and `kill -STOP` the new process: `/health` reads `stalled` once
 `WARMUP_TIMEOUT` has passed since the restart, and the next call restarts it
@@ -540,4 +624,4 @@ python3 spike/lock.py   # after editing env.yaml or requirements.txt
 docker buildx build --platform linux/amd64 --load -t voice-metrics-api .
 ```
 
-amd64 only, for the reasons in the README. The image is about 0.85 GB.
+amd64 only, for the reasons in the README. The image is about 1.04 GB (0.86 GB before the recognizer).

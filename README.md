@@ -1,12 +1,15 @@
 # Voice Metrics API
 
 Pitch and resonance scoring for voice training. Upload a recording and the
-text that was read; get back pitch statistics, a 0–1 resonance score, and,
-if you ask for it, a reading for every phone the aligner found.
+text that was read; get back pitch statistics, a 0–1 resonance score, how much
+of the text a speech recognizer heard, and, if you ask for it, a reading for
+every phone the aligner found.
 
 It force-aligns the transcript to the audio with [Montreal Forced Aligner](https://montreal-forced-aligner.readthedocs.io),
 measures F0 and F1–F3 with Praat at the midpoint of each phone, and scores each
-phone against per-phoneme population statistics. Licensed AGPL-3.0; see
+phone against per-phoneme population statistics. Whisper transcribes the
+same audio so the response can say whether the text was actually read.
+Licensed AGPL-3.0; see
 `NOTICE` for what is derived and from whom. `GET /` links to this repository.
 If you run a modified version, point `SOURCE_URL` in `app/main.py` at your own
 source.
@@ -34,6 +37,7 @@ Query parameter `include_phones=1` adds `words` and `phones` to the response. Au
   "word_count": 9,
   "oovs": [],
   "speech_coverage": 0.78,
+  "recognition": { "text": "Hello there, how have you been this past week?", "word_coverage": 1.0, "compared_words": 9 },
   "pitch":     { "mean": 181.2, "median": 178.9, "stdev": 24.1, "min": 121.0, "max": 240.3, "unit": "Hz" },
   "resonance": { "mean": 0.58, "median": 0.57, "stdev": 0.11, "balanced": 0.61 },
   "formants":  { "f1": { "mean": 512.0, "...": "..." }, "f2": { "...": "..." }, "f3": { "...": "..." }, "unit": "Hz" },
@@ -50,7 +54,10 @@ Query parameter `include_phones=1` adds `words` and `phones` to the response. Au
 - Every figure in `pitch`, `resonance`, and `formants` is a number. A take with fewer than three phones behind its pitch is refused with `too_little_voicing` instead. One with fewer than three vowels and sonorants behind its resonance is refused with `too_little_speech`. A single phone's `f0` and the formants under `phones` can still be `null`.
 - `resonance.balanced` is the figure to use when comparing takes of different sentences or checking one against a fixed target. `mean` and `median` count every scored phone so they follow the sentence's mix of sounds as well as the voice. `balanced` averages each vowel and sonorant's mean score (`L`, `M`, `N`, `NG`, `R`, `W`, `Y`, and the vowels) and leaves out stops, fricatives, and affricates, whose midpoint formants aren't resonance. Across 23 voices with only the text varying, a voice's `median` moved by 0.31 of the spread between voices and its `balanced` by 0.18. Its values spread wider across voices than `median` does so a threshold tuned on `median` won't carry over.
 - `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. An accented word is missing only if its unaccented spelling is missing too (see [Accented words](#accented-words)). [`POST /lexicon`](#post-lexicon) checks a word before anything is recorded and [Adding a word](#adding-a-word) covers adding one.
-- `speech_coverage` is the share of the clip that sits under aligned speech phones, from 0 to 1. Silence and out-of-vocabulary words don't count toward it, so a transcript with entries in `oovs` reads lower. Check it for audio that didn't match the transcript. `word_count` can't tell you that because the aligner places every in-vocabulary word no matter what the audio holds. In the seven takes measured so far, a real read came back at 0.78 to 0.82 (slow reads included) and tones or looped clips at 0.02 to 0.22. The service reports the number and leaves the floor to you. It can't catch a clip that is dense with speech but has the wrong words (0.73 in the one case measured) because forced alignment has no way to tell which words were said.
+- `speech_coverage` is the share of the clip that sits under aligned speech phones, from 0 to 1. Silence and out-of-vocabulary words don't count toward it, so a transcript with entries in `oovs` reads lower. Check it for audio that didn't match the transcript. `word_count` can't tell you that because the aligner places every in-vocabulary word no matter what the audio holds. In the seven takes measured so far, a real read came back at 0.78 to 0.82 (slow reads included) and tones or looped clips at 0.02 to 0.22. The service reports the number and leaves the floor to you. It can't catch a clip that is dense with speech but has the wrong words (0.73 in the one case measured) because forced alignment has no way to tell which words were said. `recognition` covers that case.
+- `recognition` is what a speech recognizer heard in the clip and how much of the transcript that covers. `text` is the recognizer's own transcription. `word_coverage` is the share of the transcript's words (from 0 to 1) that show up in that transcription in the same order. Case, punctuation, contractions, and spelled-out numbers don't count as differences. Words in `oovs` are left out because the recognizer has no reason to spell a name the way you did. Extra words cost nothing. A stumble or a repeated phrase doesn't lower it. `compared_words` is how many transcript words it was measured over after normalization, where a contraction counts as two.
+- Use `word_coverage` and `speech_coverage` together. Missing or wrong words lower `word_coverage` and extra speech the transcript doesn't cover lowers `speech_coverage`. In the takes measured so far, the lowest genuine read was 0.667 (a tongue twister the recognizer "corrected") and the next 0.8. A read of a different prompt topped out at 0.5. That was two greetings that share half their words. As with `speech_coverage`, the floor is yours.
+- `word_coverage` is `null` when every transcript word is out of vocabulary. `recognition` itself is `null` when the recognizer couldn't answer in time or is restarting. The rest of the response is still scored. Treat a `null` as unmeasured instead of as a mismatch.
 - `z` is the phone's F0–F3 as standard deviations from the population mean
   for that phoneme.
 
@@ -96,10 +103,10 @@ It can answer with `unauthorized`, `invalid_request`, `upload_too_large`, `align
 These are for a platform's health checks. Both return the same body at 200 and at 503:
 
 ```json
-{ "version": "0.1.0", "status": "healthy", "aligner": "ready", "analyzer": "ready" }
+{ "version": "0.1.0", "status": "healthy", "aligner": "ready", "analyzer": "ready", "recognizer": "ready" }
 ```
 
-`aligner` and `analyzer` each report one of four states:
+`aligner`, `analyzer`, and `recognizer` each report one of four states:
 
 | State | Meaning |
 | --- | --- |
@@ -108,10 +115,11 @@ These are for a platform's health checks. Both return the same body at 200 and a
 | `stalled` | Still loading after `WARMUP_TIMEOUT` |
 | `down` | The load failed or a worker process died |
 
-- `/health` is the liveness check. It answers 503 (`"status": "unhealthy"`) only while a pool is `stalled` or `down`. A pool leaves those states only when a request arrives and restarts it, so an instance that a router has stopped sending traffic to would stay stuck. A normal reload stays 200 so the check doesn't get an instance replaced in the middle of one.
-- `/ready` is the readiness check. It answers 200 (`"status": "ready"`) only when both pools are `ready` and 503 (`"not_ready"`) otherwise.
+- `/health` is the liveness check. It answers 503 (`"status": "unhealthy"`) only while the aligner or the analyzer is `stalled` or `down`. A pool leaves those states only when a request arrives and restarts it, so an instance that a router has stopped sending traffic to would stay stuck. A normal reload stays 200 so the check doesn't get an instance replaced in the middle of one.
+- `/ready` is the readiness check. It answers 200 (`"status": "ready"`) only when the aligner and the analyzer are `ready` and 503 (`"not_ready"`) otherwise.
+- The recognizer's state is in both bodies but never changes either answer. While it's `down` or reloading, `/analyze` still scores takes and returns `recognition: null`. The next request restarts it.
 
-The server doesn't accept connections until both pools have loaded at startup, about 10 seconds under emulation. If the load is still running after `WARMUP_TIMEOUT`, the server logs which pool didn't load and exits with code 3. It exits the same way before loading anything when it can't tell whether auth is meant to be on (see [Running it](#running-it)). Give the platform's startup check at least `WARMUP_TIMEOUT` before it gives up.
+The server doesn't accept connections until all three pools have loaded at startup, about 13 seconds under emulation. If the load is still running after `WARMUP_TIMEOUT`, the server logs which pool didn't load and exits with code 3. It exits the same way before loading anything when it can't tell whether auth is meant to be on (see [Running it](#running-it)). Give the platform's startup check at least `WARMUP_TIMEOUT` before it gives up.
 
 On a single instance, point only the liveness check at the service. A router that follows `/ready` sends nothing during a reload, so requests that would have waited it out fail at the router instead.
 
@@ -176,6 +184,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
    mapped to 0–1 with 0.5 at the population mean. Pitch and resonance are
    then summarized across phones. `resonance.balanced` first averages each
    vowel and sonorant label's scores, then averages those.
+5. While steps 2 to 4 run, Whisper tiny.en (through faster-whisper, in its own worker process) transcribes the clip. It never sees the transcript because prompting it with the expected text would bias it toward hearing that text. Its words and the aligned words both go through Whisper's English text normalizer. `word_coverage` is the share of the aligned words (out-of-vocabulary ones aside) that appear in order in what it heard.
 
 ## Dictionary
 
@@ -259,13 +268,15 @@ The image is amd64 only: `praat-parselmouth` has no arm64 wheels and MFA's
 Kaldi build is linux-64. On Apple Silicon the build and the container run
 under emulation.
 
-Environment variables: `PORT` (8080), `API_TOKEN` (required unless `ALLOW_UNAUTHENTICATED=1`), `ALLOW_UNAUTHENTICATED` (`1` turns auth off), `ALIGN_TIMEOUT` seconds (10), `WARMUP_TIMEOUT` seconds (60), `ANALYZER_WORKERS` Praat processes (2), `MODEL_DIR` (/opt/mfa-models).
+Environment variables: `PORT` (8080), `API_TOKEN` (required unless `ALLOW_UNAUTHENTICATED=1`), `ALLOW_UNAUTHENTICATED` (`1` turns auth off), `ALIGN_TIMEOUT` seconds (10), `RECOGNIZE_TIMEOUT` seconds (10), `WARMUP_TIMEOUT` seconds (60), `ANALYZER_WORKERS` Praat processes (2), `RECOGNIZER_THREADS` (2), `MODEL_DIR` (/opt/mfa-models), `WHISPER_MODEL_DIR` (/opt/whisper/tiny.en).
 
-Each Praat process holds about 150 MB. Requests queue for a free one under a burst of long clips, and a host with CPUs to spare can raise `ANALYZER_WORKERS` to get through a burst faster.
+Each Praat process holds about 150 MB. Requests queue for a free one under a burst of long clips, and a host with CPUs to spare can raise `ANALYZER_WORKERS` to get through a burst faster. The recognizer is one process of 210 to 330 MB that uses `RECOGNIZER_THREADS` CPU threads.
+
+Under emulation the recognizer runs about 15 times slower than it does natively because Rosetta can't run the AVX instructions it relies on. A clip longer than about 35 seconds runs past `RECOGNIZE_TIMEOUT` and comes back with `recognition: null`. Add `-e RECOGNIZE_TIMEOUT=30` to the `docker run` when you need the figure for long clips locally. Leave it at 10 wherever a client is waiting. Recognition gets that timeout twice, once to reach its turn and once to run.
 
 ## Logs
 
-The service writes to stderr: a line at startup with the auth mode, one line per request, and a line whenever the aligner or the Praat workers restart, finish loading, or fail to load. These came from a container whose aligner was killed while idle:
+The service writes to stderr: a line at startup with the auth mode, one line per request, and a line whenever the aligner, the Praat workers, or the recognizer restart, finish loading, or fail to load. These came from a container whose aligner was killed while idle:
 
 ```text
 2026-11-07 18:26:17,099 INFO request=job-41 POST /analyze 200 total_ms=199 decode_ms=101 audio_s=1.3 aligner_wait_ms=0 aligner_ms=5 words=2 oovs=1 praat_wait_ms=1 praat_ms=69
@@ -284,17 +295,21 @@ A request line has the status, the error `code` if there was one, and the time e
 - `aligner_ms`: the alignment, or the `/lexicon` check
 - `praat_wait_ms`: waiting for a free Praat worker
 - `praat_ms`: the Praat pass
+- `recognizer_wait_ms`: waiting out a recognizer reload and the recognition ahead
+- `recognizer_ms`: the recognition
+
+A scored `/analyze` line also carries `recognition=`. It's `ok` followed by `word_coverage` and `compared_words`, or the reason the figure is null: `recognizer_busy`, `recognition_timeout`, or `recognizer_unavailable`. Those three are reasons on a 200 and never error codes.
 
 A `praat_wait_ms` that keeps growing under load means `ANALYZER_WORKERS` is too low. An unhandled exception adds `error=` with the exception's class. `/health` and `/ready` stay out of the log unless they answer 503.
 
-A restart line names its `reason` (`alignment_timeout`, `worker_lost`, or `warmup_timeout`) and the `exitcode` of any worker that died:
+A restart line names its `reason` (`alignment_timeout`, `recognition_timeout`, `worker_lost`, or `warmup_timeout`) and the `exitcode` of any worker that died:
 
 - `-6`: the process aborted, which is how Kaldi reports a fatal error
 - `-9`: the process was killed, as by the out-of-memory killer
 - `-11`: a segfault, as from a dictionary phone the acoustic model lacks (see [Adding a word](#adding-a-word))
 - `-15`: the pool stopped the process itself after another Praat worker died
 
-No line includes the transcript or its words, out-of-vocabulary words (only their count), the upload's filename, an error's `detail`, or the client's IP, because a transcript can include someone's name. Uvicorn's access log is off since the request line replaces it.
+No line includes the transcript or its words, what the recognizer heard, out-of-vocabulary words (only their count), the upload's filename, an error's `detail`, or the client's IP, because a transcript can include someone's name. Uvicorn's access log is off since the request line replaces it.
 
 ## Tests
 
@@ -325,9 +340,10 @@ It needs Docker and takes about 30 seconds. It solves the inputs in the Dockerfi
 
 `.venv/bin/pytest` fails when an input has changed and its lock hasn't. The `.venv` itself installs `requirements.txt` without the lock because the lock is for the image's Linux build.
 
-Then build the `test` stage and run the suite in it, as in [Tests](#tests). Read the `env.lock` diff before merging because a new version of any of these can change the figures for the same recording:
+Then build the `test` stage and run the suite in it, as in [Tests](#tests). Read the `env.lock` and `requirements.lock` diffs before merging because a new version of any of these can change the figures for the same recording:
 
 - `ffmpeg`, which decodes the upload
 - `praat-parselmouth`, which takes the pitch and formant readings
 - `kaldi`, `kalpy`, and `montreal-forced-aligner`, which do the alignment
 - `libblas`, `liblapack`, and `libopenblas`, which Kaldi's matrix code calls
+- `faster-whisper` and `ctranslate2` (in `requirements.lock`), which do the recognition
