@@ -22,6 +22,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StringConstraints
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
@@ -44,6 +45,7 @@ MIN_SCORED_PHONES = 3
 MAX_LEXICON_WORDS = 1000
 MAX_WORD_LENGTH = 200
 MAX_TRANSCRIPT_LENGTH = 4000
+MAX_BODY_BYTES = 16 * 1024 * 1024
 SOURCE_URL = "https://github.com/madisonjmeredith/voice-metrics-api"
 
 
@@ -96,17 +98,57 @@ async def lifespan(app: FastAPI):
         app.state.analyzer.shutdown()
 
 
+class BodyLimit:
+    """Refuses a body over MAX_BODY_BYTES as it arrives: FastAPI reads all of it before any dependency."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        declared = Headers(scope=scope).get("content-length", "")
+        declared_too_large = declared.isdigit() and int(declared) > MAX_BODY_BYTES
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            if declared_too_large:
+                raise UploadTooLargeError()
+            message = await receive()
+            received += len(message.get("body", b""))
+            if received > MAX_BODY_BYTES:
+                raise UploadTooLargeError()
+            return message
+
+        await self.app(scope, limited_receive, send)
+
+
 app = FastAPI(
     title="voice-metrics-api",
     description="Pitch and resonance scoring from a recording and its transcript",
     version=__version__,
     lifespan=lifespan,
 )
+app.add_middleware(BodyLimit)
 app.add_middleware(RequestLog, quiet=frozenset({"/health", "/ready"}))
 
 
 class InvalidTokenError(Exception):
     """The bearer token is missing or does not match API_TOKEN."""
+
+
+# HTTPException: FastAPI wraps anything else raised while reading the body in a generic 400.
+class UploadTooLargeError(StarletteHTTPException):
+    """The request body is larger than MAX_BODY_BYTES."""
+
+    def __init__(self) -> None:
+        super().__init__(400, f"Upload too large. Keep it under {MAX_BODY_BYTES / 2**20:.0f} MB.")
+
+    def __str__(self) -> str:
+        return self.detail
 
 
 class AudioTooShortError(Exception):
@@ -137,6 +179,7 @@ ERRORS: dict[type[Exception], ErrorKind] = {
     AudioDecodeError: ErrorKind(400, "audio_undecodable", False),
     AudioTooShortError: ErrorKind(400, "audio_too_short", False),
     AudioTooLongError: ErrorKind(400, "audio_too_long", False),
+    UploadTooLargeError: ErrorKind(400, "upload_too_large", False),
     EmptyTranscriptError: ErrorKind(400, "transcript_empty", False),
     AlignmentError: ErrorKind(422, "alignment_failed", False),
     TooLittleSpeechError: ErrorKind(422, "too_little_speech", False),

@@ -167,6 +167,7 @@ def test_error_codes_are_the_published_contract():
         "AudioDecodeError": (400, "audio_undecodable", False),
         "AudioTooShortError": (400, "audio_too_short", False),
         "AudioTooLongError": (400, "audio_too_long", False),
+        "UploadTooLargeError": (400, "upload_too_large", False),
         "EmptyTranscriptError": (400, "transcript_empty", False),
         "AlignmentError": (422, "alignment_failed", False),
         "TooLittleSpeechError": (422, "too_little_speech", False),
@@ -234,6 +235,40 @@ def test_a_transcript_at_the_cap_is_aligned(client, vowel_a):
         response = post_analyze(c, vowel_a, transcript="a" * main.MAX_TRANSCRIPT_LENGTH)
     assert response.status_code == 200
     assert len(aligner.calls[0][2]) == main.MAX_TRANSCRIPT_LENGTH
+
+
+def test_a_body_over_the_cap_is_refused_before_decoding(client, vowel_a, monkeypatch):
+    monkeypatch.setattr(main, "MAX_BODY_BYTES", 1000)
+    aligner = FakeAligner(vowel_alignment())
+    with client(aligner) as c:
+        response = post_analyze(c, vowel_a)
+    assert error_of(response) == tuple(main.ERRORS[main.UploadTooLargeError])
+    assert "too large" in response.json()["detail"]
+    assert aligner.calls == []
+
+
+def test_a_streamed_body_is_refused_once_it_passes_the_cap(client, monkeypatch):
+    monkeypatch.setattr(main, "MAX_BODY_BYTES", 1000)
+
+    def chunks():
+        yield b'--b\r\nContent-Disposition: form-data; name="audio"; filename="a.webm"\r\n\r\n'
+        for _ in range(10):
+            yield b"\0" * 500
+
+    with client(FakeAligner(vowel_alignment())) as c:
+        response = c.post(
+            "/analyze", content=chunks(), headers={"Content-Type": "multipart/form-data; boundary=b"}
+        )
+    assert "content-length" not in response.request.headers
+    assert error_of(response) == tuple(main.ERRORS[main.UploadTooLargeError])
+
+
+def test_the_body_cap_applies_before_the_token_check(client, vowel_a, monkeypatch):
+    use_token(monkeypatch)
+    monkeypatch.setattr(main, "MAX_BODY_BYTES", 1000)
+    with client(FakeAligner(vowel_alignment())) as c:
+        response = post_analyze(c, vowel_a)
+    assert error_of(response) == tuple(main.ERRORS[main.UploadTooLargeError])
 
 
 @needs_ffmpeg

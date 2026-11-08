@@ -22,7 +22,7 @@ Multipart form.
 | `audio` | file | Anything ffmpeg decodes; browsers send WebM or MP4 |
 | `transcript` | string | The English text that was read aloud, up to 4,000 characters |
 
-Query parameter `include_phones=1` adds `words` and `phones` to the response. Audio must be 1–60 seconds. Requests need `Authorization: Bearer <token>` with the server's `API_TOKEN` as the token. A server started with `ALLOW_UNAUTHENTICATED=1` takes them without one (see [Running it](#running-it)).
+Query parameter `include_phones=1` adds `words` and `phones` to the response. Audio must be 1–60 seconds, and the whole request can be up to 16 MB. Requests need `Authorization: Bearer <token>` with the server's `API_TOKEN` as the token. A server started with `ALLOW_UNAUTHENTICATED=1` takes them without one (see [Running it](#running-it)).
 
 ```json
 {
@@ -89,7 +89,7 @@ Each entry goes through the tokenizer `/analyze` uses, by itself. An entry can b
 
 The check runs in the aligner's worker process. It waits behind an alignment that's in progress or a restart for up to `ALIGN_TIMEOUT`.
 
-It can answer with `unauthorized`, `invalid_request`, `aligner_unavailable`, `aligner_busy`, or `alignment_timeout` from [Errors](#errors).
+It can answer with `unauthorized`, `invalid_request`, `upload_too_large`, `aligner_unavailable`, `aligner_busy`, or `alignment_timeout` from [Errors](#errors).
 
 ### `GET /health` and `GET /ready`
 
@@ -148,6 +148,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 | 400 | `audio_undecodable` | false | ffmpeg can't decode the upload |
 | 400 | `audio_too_short` | false | The audio is shorter than 1 second |
 | 400 | `audio_too_long` | false | The audio is longer than 60 seconds |
+| 400 | `upload_too_large` | false | The request body is larger than 16 MB |
 | 400 | `transcript_empty` | false | Nothing in the transcript is left to align after normalization |
 | 422 | `alignment_failed` | false | The aligner couldn't align the transcript to the audio, even with a wide beam |
 | 422 | `too_little_speech` | false | Fewer than three vowels and sonorants could be scored |
