@@ -19,7 +19,11 @@ class AudioDecodeError(Exception):
     """
 
 
-def convert_to_wav(input_path: Path, output_path: Path, max_seconds: float) -> Path:
+class DecodeTimeout(Exception):
+    """ffmpeg ran past its timeout and was killed."""
+
+
+def convert_to_wav(input_path: Path, output_path: Path, max_seconds: float, timeout: float) -> Path:
     """
     Convert audio file to 16 kHz mono 16-bit PCM WAV.
 
@@ -27,12 +31,14 @@ def convert_to_wav(input_path: Path, output_path: Path, max_seconds: float) -> P
         input_path: Path to input audio file (WebM, MP3, etc.)
         output_path: Path for output WAV file
         max_seconds: Where ffmpeg stops writing, and so stops reading the input
+        timeout: Seconds ffmpeg gets before it is killed
 
     Returns:
         Path to the converted WAV file
 
     Raises:
         AudioDecodeError: If ffmpeg cannot decode the input
+        DecodeTimeout: If ffmpeg runs longer than timeout
     """
     try:
         subprocess.run(
@@ -50,7 +56,10 @@ def convert_to_wav(input_path: Path, output_path: Path, max_seconds: float) -> P
             capture_output=True,
             text=True,
             errors="replace",
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as e:
+        raise DecodeTimeout(f"ffmpeg ran longer than {timeout:g} s") from e
     except subprocess.CalledProcessError as e:
         detail = e.stderr.strip().splitlines()
         raise AudioDecodeError(detail[-1] if detail else "ffmpeg could not decode the file") from e

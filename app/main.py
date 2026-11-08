@@ -28,7 +28,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import __version__
 from app.aligner import Alignment, AlignmentError, EmptyTranscriptError
 from app.analyzer_pool import AnalyzerPool, AnalyzerUnavailable
-from app.converter import AudioDecodeError, convert_to_wav, get_audio_duration
+from app.converter import AudioDecodeError, DecodeTimeout, convert_to_wav, get_audio_duration
 from app.measurement import MeasuredPhone
 from app.scoring import score
 from app.pool import PoolState
@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 MIN_DURATION = 1.0
 MAX_DURATION = 60.0
+DECODE_TIMEOUT = 5.0
 MIN_SCORED_PHONES = 3
 MAX_LEXICON_WORDS = 1000
 MAX_WORD_LENGTH = 200
@@ -184,6 +185,7 @@ ERRORS: dict[type[Exception], ErrorKind] = {
     AlignmentError: ErrorKind(422, "alignment_failed", False),
     TooLittleSpeechError: ErrorKind(422, "too_little_speech", False),
     TooLittleVoicingError: ErrorKind(422, "too_little_voicing", False),
+    DecodeTimeout: ErrorKind(504, "decode_timeout", True),
     AlignmentTimeout: ErrorKind(504, "alignment_timeout", True),
     AlignerUnavailable: ErrorKind(503, "aligner_unavailable", True),
     AlignerBusy: ErrorKind(503, "aligner_busy", True),
@@ -271,7 +273,9 @@ def _save_as_wav(upload: UploadFile, tmp_path: Path) -> tuple[Path, float]:
     input_path = tmp_path / "input_audio"
     with open(input_path, "wb") as f:
         shutil.copyfileobj(upload.file, f)
-    wav_path = convert_to_wav(input_path, tmp_path / "audio.wav", max_seconds=MAX_DURATION + 1)
+    wav_path = convert_to_wav(
+        input_path, tmp_path / "audio.wav", max_seconds=MAX_DURATION + 1, timeout=DECODE_TIMEOUT
+    )
     return wav_path, get_audio_duration(wav_path)
 
 

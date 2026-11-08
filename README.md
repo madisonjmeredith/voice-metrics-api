@@ -155,6 +155,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 | 422 | `too_little_voicing` | false | Fewer than three phones had a measurable pitch, as in a near-silent take |
 | 401 | `unauthorized` | true | The bearer token is missing or wrong |
 | 400, 422 | `invalid_request` | true | A field is missing or invalid (422), or the body couldn't be parsed (400) |
+| 504 | `decode_timeout` | true | ffmpeg ran longer than 5 seconds on the upload and was stopped |
 | 503 | `aligner_unavailable` | true | The aligner process died or didn't load within `WARMUP_TIMEOUT`, and a new one is starting |
 | 503 | `aligner_busy` | true | The aligner didn't reach the request within `ALIGN_TIMEOUT`, as during a restart. Nothing was restarted |
 | 504 | `alignment_timeout` | true | The request ran longer than `ALIGN_TIMEOUT` once the aligner reached it, so the aligner was restarted |

@@ -18,7 +18,7 @@ from app import __version__
 from app.aligner import Alignment, AlignmentError, EmptyTranscriptError, Tokenized
 import app.analyzer_pool as analyzer_pool
 from app.analyzer_pool import AnalyzerUnavailable
-from app.converter import AudioDecodeError
+from app.converter import AudioDecodeError, DecodeTimeout
 from app.measurement import MeasuredPhone
 from app.pool import PoolState
 from app.worker import AlignerBusy, AlignerUnavailable, AlignmentTimeout
@@ -172,6 +172,7 @@ def test_error_codes_are_the_published_contract():
         "AlignmentError": (422, "alignment_failed", False),
         "TooLittleSpeechError": (422, "too_little_speech", False),
         "TooLittleVoicingError": (422, "too_little_voicing", False),
+        "DecodeTimeout": (504, "decode_timeout", True),
         "AlignmentTimeout": (504, "alignment_timeout", True),
         "AlignerUnavailable": (503, "aligner_unavailable", True),
         "AlignerBusy": (503, "aligner_busy", True),
@@ -201,6 +202,16 @@ def test_too_long(client, vowel_a, monkeypatch):
         response = post_analyze(c, vowel_a)
     assert error_of(response) == tuple(main.ERRORS[main.AudioTooLongError])
     assert "long" in response.json()["detail"]
+
+
+@needs_ffmpeg
+def test_a_slow_decode_answers_504(client, vowel_a, monkeypatch):
+    monkeypatch.setattr(main, "DECODE_TIMEOUT", 0.001)
+    aligner = FakeAligner(vowel_alignment())
+    with client(aligner) as c:
+        response = post_analyze(c, vowel_a)
+    assert error_of(response) == tuple(main.ERRORS[DecodeTimeout])
+    assert aligner.calls == []
 
 
 @needs_ffmpeg
