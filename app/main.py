@@ -271,7 +271,7 @@ def _save_as_wav(upload: UploadFile, tmp_path: Path) -> tuple[Path, float]:
     input_path = tmp_path / "input_audio"
     with open(input_path, "wb") as f:
         shutil.copyfileobj(upload.file, f)
-    wav_path = convert_to_wav(input_path, tmp_path / "audio.wav")
+    wav_path = convert_to_wav(input_path, tmp_path / "audio.wav", max_seconds=MAX_DURATION + 1)
     return wav_path, get_audio_duration(wav_path)
 
 

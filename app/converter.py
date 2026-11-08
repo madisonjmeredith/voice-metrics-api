@@ -19,13 +19,14 @@ class AudioDecodeError(Exception):
     """
 
 
-def convert_to_wav(input_path: Path, output_path: Path) -> Path:
+def convert_to_wav(input_path: Path, output_path: Path, max_seconds: float) -> Path:
     """
     Convert audio file to 16 kHz mono 16-bit PCM WAV.
 
     Args:
         input_path: Path to input audio file (WebM, MP3, etc.)
         output_path: Path for output WAV file
+        max_seconds: Where ffmpeg stops writing, and so stops reading the input
 
     Returns:
         Path to the converted WAV file
@@ -42,6 +43,7 @@ def convert_to_wav(input_path: Path, output_path: Path) -> Path:
                 "-acodec", "pcm_s16le",  # 16-bit PCM
                 "-ac", "1",  # Mono
                 "-ar", "16000",  # 16kHz sample rate
+                "-t", str(max_seconds),
                 str(output_path),
             ],
             check=True,

@@ -164,7 +164,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 
 ## How it works
 
-1. `ffmpeg` transcodes the upload to 16 kHz mono 16-bit PCM WAV.
+1. `ffmpeg` transcodes the upload to 16 kHz mono 16-bit PCM WAV. It stops a second past 60 seconds, so a longer upload is refused without being decoded in full.
 2. MFA's `english_us_arpa` model aligns the transcript, giving a start and end
    for every word and ARPAbet phone. The model is loaded once, in a dedicated
    worker process, and reused.
