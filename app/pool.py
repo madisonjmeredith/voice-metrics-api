@@ -1,20 +1,25 @@
 """
 A process pool that runs a warm-up on every start and logs its loads and restarts.
 
-The aligner and the Praat workers both build on it. A line about a dead worker
-carries its exit code: -6 is abort(), -9 a kill, -11 a segfault.
+The aligner and the Praat workers both build on it, and the aligner on
+SerialPool's queue. A line about a dead worker carries its exit code: -6 is
+abort(), -9 a kill, -11 a segfault.
 """
 
 import asyncio
 import logging
+import multiprocessing
 import multiprocessing.connection
 import os
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
+
+from app.telemetry import timed
 
 WARMUP_TIMEOUT = float(os.environ.get("WARMUP_TIMEOUT", "60"))
 WARMUP_WAV = Path(__file__).parent / "warmup.wav"
@@ -36,6 +41,12 @@ class PoolState(StrEnum):
 
 def _failed(future: Future) -> bool:
     return future.done() and not future.cancelled() and future.exception() is not None
+
+
+def retrieve(task: asyncio.Future) -> None:
+    """Mark a task's exception as seen, so one nobody awaits isn't logged as never retrieved."""
+    if not task.cancelled():
+        task.exception()
 
 
 class WarmPool:
@@ -118,6 +129,83 @@ class WarmPool:
             )
         elif not failed and all(f.done() for f in self._warmups):
             logger.info("%s ready load_s=%.1f", self.name, time.monotonic() - self._started_at)
+
+
+class SerialPool(WarmPool):
+    """One worker whose calls queue in this process, each timed once to reach its turn and once to run."""
+
+    Busy: type[Exception]
+    Unavailable: type[Exception]
+    TimedOut: type[Exception]
+    timeout_reason: str
+
+    def __init__(self, timeout: float, warmup_timeout: float = WARMUP_TIMEOUT) -> None:
+        super().__init__(warmup_timeout)
+        self.timeout = timeout
+        self._turn = asyncio.Lock()
+
+    def _initializer(self) -> tuple[Callable, tuple]:
+        raise NotImplementedError
+
+    def _warmup(self) -> tuple[Callable, tuple]:
+        raise NotImplementedError
+
+    def _create_executor(self) -> ProcessPoolExecutor:
+        initializer, initargs = self._initializer()
+        return ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=initializer,
+            initargs=initargs,
+        )
+
+    def _submit_warmups(self, pool: ProcessPoolExecutor) -> list[Future]:
+        fn, args = self._warmup()
+        return [pool.submit(fn, *args)]
+
+    async def _wait_for_turn(self, warmup: Future) -> bool:
+        """Wait out the warm-up and the calls ahead, then take the turn; False if time runs out."""
+        loaded = asyncio.gather(asyncio.wrap_future(warmup), return_exceptions=True)
+        try:
+            async with asyncio.timeout(self.timeout):
+                # Shielded so a timeout can't cancel the warm-up through wrap_future.
+                await asyncio.shield(loaded)
+                await self._turn.acquire()
+        except asyncio.TimeoutError:
+            return False
+        return True
+
+    async def _call(self, fn, *args):
+        """Run fn in the worker; a caller that leaves mid-run leaves the call timed and holding the turn."""
+        pool, [warmup], started_at = self._pool, self._warmups, self._started_at
+        with timed(f"{self.name}_wait"):
+            reached = await self._wait_for_turn(warmup)
+        if not reached:
+            if self._load_overdue([warmup], started_at):
+                self._restart_if_current(pool, "warmup_timeout")
+                raise self.Unavailable(
+                    f"The {self.name} did not load within {self.warmup_timeout:.0f} s"
+                )
+            raise self.Busy(f"The {self.name} did not reach the call within {self.timeout:.0f} s")
+        run = asyncio.create_task(self._run(pool, fn, args))
+        run.add_done_callback(retrieve)
+        return await asyncio.shield(run)
+
+    async def _run(self, pool: Optional[ProcessPoolExecutor], fn, args):
+        try:
+            if self._pool is not pool:
+                raise self.Unavailable(f"The {self.name} restarted while the call waited")
+            future = pool.submit(fn, *args)
+            with timed(self.name):
+                return await asyncio.wait_for(asyncio.wrap_future(future), timeout=self.timeout)
+        except asyncio.TimeoutError:
+            self._restart_if_current(pool, self.timeout_reason)
+            raise self.TimedOut(f"The call ran longer than {self.timeout:.0f} s")
+        except BrokenProcessPool as e:
+            self._restart_if_current(pool, "worker_lost")
+            raise self.Unavailable(str(e))
+        finally:
+            self._turn.release()
 
 
 def _dead_workers(pool: ProcessPoolExecutor) -> list[multiprocessing.Process]:

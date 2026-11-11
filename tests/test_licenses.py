@@ -7,6 +7,6 @@ import pytest
 ROOT = Path(__file__).parents[1]
 
 
-@pytest.mark.parametrize("path", ["LICENSE", "NOTICE", "dictionary/LICENSE.cmudict"])
+@pytest.mark.parametrize("path", ["LICENSE", "NOTICE", "dictionary/LICENSE.cmudict", "app/normalizers/LICENSE"])
 def test_license_file_ships_with_the_code(path):
     assert (ROOT / path).is_file()

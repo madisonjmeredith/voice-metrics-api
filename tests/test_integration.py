@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from app.converter import get_audio_duration
-from tests.conftest import FIXTURES, FS, needs_mfa, post_analyze, use_token, write_wav
+from tests.conftest import FIXTURES, FS, needs_mfa, needs_whisper, post_analyze, use_token, write_wav
 from tests.textgrids import parse_textgrid
 
 HELLO_WAV = FIXTURES / "hello.wav"
@@ -134,6 +134,18 @@ def test_full_request_through_the_app(app_client):
     assert [w["word"] for w in body["words"]] == ["hello", "there", "world"]
     assert body["scored_phone_count"] >= 3
     assert 0.0 <= body["resonance"]["median"] <= 1.0
+    assert body["recognition"] == {"text": "Hello there, world.", "word_coverage": 1.0, "compared_words": 3}
+
+
+@needs_mfa
+@needs_whisper
+def test_a_fluent_read_of_other_words_is_not_heard_as_the_transcript(app_client):
+    response = post_analyze(app_client, HELLO_WAV, "Can you hear me okay?")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["recognition"] == {
+        "text": "Hello there, world.", "word_coverage": 0.0, "compared_words": 5,
+    }
 
 
 @needs_mfa

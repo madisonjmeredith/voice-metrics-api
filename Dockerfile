@@ -21,6 +21,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         https://github.com/MontrealCorpusTools/mfa-models/releases/download/dictionary-english_us_arpa-v3.0.0/english_us_arpa.dict \
     && echo "e8c6c7b036ae2b7c78d2768b8dc6b1f9359175b842956d00b48c53c9c332e6b0  $MODEL_DIR/dictionary/english_us_arpa.base.dict" | sha256sum -c - \
     && chown -R $MAMBA_USER:$MAMBA_USER $MODEL_DIR
+
+ENV WHISPER_MODEL_DIR=/opt/whisper/tiny.en
+RUN mkdir -p $WHISPER_MODEL_DIR && cd $WHISPER_MODEL_DIR \
+    && printf '%s\n' \
+        "14b1b421a90349bc551b881461426b561a874049cb9e4c4864f2ca384f6a7cc5  config.json" \
+        "1a5afae06a4db91c975c9a9d78be5cc110ee4ea022ad57d55492e4550e936b2a  model.bin" \
+        "929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df  tokenizer.json" \
+        "ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf  vocabulary.txt" \
+       > /tmp/whisper.sha256 \
+    && while read -r sum f; do \
+         curl -fsSL -o $f https://huggingface.co/Systran/faster-whisper-tiny.en/resolve/0d3d19a32d3338f10357c0889762bd8d64bbdeba/$f || exit 1; \
+       done < /tmp/whisper.sha256 \
+    && sha256sum -c /tmp/whisper.sha256 && rm /tmp/whisper.sha256 \
+    && chown -R $MAMBA_USER:$MAMBA_USER $WHISPER_MODEL_DIR
 USER $MAMBA_USER
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER env.lock /tmp/env.lock

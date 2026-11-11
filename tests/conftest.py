@@ -18,6 +18,7 @@ import pytest
 
 from app import telemetry
 from app.aligner import Alignment, LoadedAligner, PhoneSpan, WordSpan
+from app.recognizer_pool import WHISPER_MODEL_DIR
 from app.worker import ACOUSTIC_DIR, DICTIONARY_PATH
 
 FS = 16000
@@ -73,9 +74,9 @@ def write_wav(path: Path, signal: np.ndarray) -> Path:
     return path
 
 
-def vowel_alignment(labels=("AA1", "AH0", "AA1", "AH0"), oovs=()) -> Alignment:
+def vowel_alignment(labels=("AA1", "AH0", "AA1", "AH0"), oovs=(), word="ah") -> Alignment:
     """Phones spread evenly over the 1.5 s vowel_a clip, framed by silence."""
-    words = [WordSpan("<eps>", 0.0, 0.1), WordSpan("ah", 0.1, 1.4), WordSpan("<eps>", 1.4, 1.5)]
+    words = [WordSpan("<eps>", 0.0, 0.1), WordSpan(word, 0.1, 1.4), WordSpan("<eps>", 1.4, 1.5)]
     step = 1.3 / len(labels)
     phones = [PhoneSpan("sil", 0.0, 0.1)]
     for i, label in enumerate(labels):
@@ -91,8 +92,8 @@ async def noted(call):
         return await call, fields
 
 
-def pool_lines(caplog, level: int = logging.WARNING) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.name == "app.pool" and r.levelno == level]
+def pool_lines(caplog, level: int = logging.WARNING, logger: str = "app.pool") -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == logger and r.levelno == level]
 
 
 def eventually(check, timeout: float = 5.0) -> None:
@@ -176,3 +177,5 @@ def _has_mfa() -> bool:
 
 
 needs_mfa = pytest.mark.skipif(not _has_mfa(), reason="MFA is not installed")
+
+needs_whisper = pytest.mark.skipif(not WHISPER_MODEL_DIR.is_dir(), reason="The Whisper model is not installed")

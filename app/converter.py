@@ -9,6 +9,8 @@ import subprocess
 import wave
 from pathlib import Path
 
+import numpy as np
+
 
 class AudioDecodeError(Exception):
     """
@@ -92,3 +94,9 @@ def get_audio_duration(wav_path: Path) -> float:
             return w.getnframes() / frame_rate
     except (wave.Error, EOFError) as e:
         raise AudioDecodeError(str(e)) from e
+
+
+def read_samples(wav_path: Path) -> np.ndarray:
+    """A WAV from convert_to_wav() as float32 samples in [-1, 1)."""
+    with wave.open(str(wav_path), "rb") as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768
