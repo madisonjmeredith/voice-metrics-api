@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+SAMPLE_RATE = 16000
+
 
 class AudioDecodeError(Exception):
     """
@@ -50,7 +52,7 @@ def convert_to_wav(input_path: Path, output_path: Path, max_seconds: float, time
                 "-i", str(input_path),
                 "-acodec", "pcm_s16le",  # 16-bit PCM
                 "-ac", "1",  # Mono
-                "-ar", "16000",  # 16kHz sample rate
+                "-ar", str(SAMPLE_RATE),
                 "-t", str(max_seconds),
                 str(output_path),
             ],

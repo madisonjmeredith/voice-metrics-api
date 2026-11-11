@@ -18,11 +18,14 @@ import pytest
 
 from app import telemetry
 from app.aligner import Alignment, LoadedAligner, PhoneSpan, WordSpan
+from app.converter import read_samples
 from app.recognizer_pool import WHISPER_MODEL_DIR
 from app.worker import ACOUSTIC_DIR, DICTIONARY_PATH
 
 FS = 16000
 FIXTURES = Path(__file__).parent / "fixtures"
+HELLO_WAV = FIXTURES / "hello.wav"
+HELLO_LEAD_IN = 1.75
 
 BANDWIDTHS = [60.0, 90.0, 120.0, 150.0, 200.0]
 
@@ -155,6 +158,25 @@ def hiss(audio_dir: Path) -> Path:
     """1.5 s of quiet white noise, in which Praat finds formants but no pitch."""
     noise = np.random.default_rng(0).standard_normal(int(FS * 1.5)) * 0.003
     return write_wav(audio_dir / "hiss.wav", noise)
+
+
+@pytest.fixture(scope="session")
+def tone(audio_dir: Path) -> Path:
+    """2 s of a 440 Hz sine."""
+    return write_wav(audio_dir / "tone.wav", 0.5 * np.sin(2 * np.pi * 440.0 * np.arange(FS * 2) / FS))
+
+
+@pytest.fixture(scope="session")
+def hello_after_lead_in(audio_dir: Path) -> Path:
+    """hello.wav after 1 s of -40 dB noise and near silence up to HELLO_LEAD_IN, then 1.5 s of near silence."""
+    rng = np.random.default_rng(45)
+
+    def noise(seconds: float, db: float) -> np.ndarray:
+        return rng.standard_normal(int(FS * seconds)) * 10 ** (db / 20)
+
+    lead_in = np.concatenate([noise(1.0, -40), noise(HELLO_LEAD_IN - 1.0, -70)])
+    signal = np.concatenate([lead_in, read_samples(HELLO_WAV), noise(1.5, -70)])
+    return write_wav(audio_dir / "hello_lead_in.wav", signal)
 
 
 @pytest.fixture

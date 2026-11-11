@@ -10,10 +10,19 @@ import pytest
 
 from app.aligner import AlignmentTimeout
 from app.converter import get_audio_duration
-from tests.conftest import FIXTURES, FS, needs_mfa, needs_whisper, post_analyze, use_token, write_wav
+from tests.conftest import (
+    FIXTURES,
+    FS,
+    HELLO_LEAD_IN,
+    HELLO_WAV,
+    needs_mfa,
+    needs_whisper,
+    post_analyze,
+    use_token,
+    write_wav,
+)
 from tests.textgrids import parse_textgrid
 
-HELLO_WAV = FIXTURES / "hello.wav"
 HELLO_TEXT = "Hello there, world."
 PLAYLIST_WAV = FIXTURES / "playlist.wav"
 PLAYLIST_TEXT = "Update the playlist with a decaf vibe."
@@ -55,6 +64,19 @@ def test_coverage_is_low_when_the_audio_is_not_the_transcript(aligner, tmp_path)
 
     assert [w.label for w in alignment.speech_words] == ["can", "you", "hear", "me", "okay"]
     assert alignment.speech_coverage(seconds) < 0.3
+    assert alignment.speech_span is None
+
+
+@needs_mfa
+def test_a_low_level_lead_in_is_left_out_of_the_alignment(aligner, hello_after_lead_in):
+    alignment = aligner.align(hello_after_lead_in, get_audio_duration(hello_after_lead_in), HELLO_TEXT)
+    plain = aligner.align(HELLO_WAV, get_audio_duration(HELLO_WAV), HELLO_TEXT)
+
+    assert [w.label for w in alignment.speech_words] == ["hello", "there", "world"]
+    assert alignment.speech_span[0] > 1.0
+    assert alignment.speech_phones[0].start == pytest.approx(
+        HELLO_LEAD_IN + plain.speech_phones[0].start, abs=0.05
+    )
 
 
 @needs_mfa
@@ -116,7 +138,7 @@ def test_aligns_words_the_release_dictionary_lacks(aligner):
 
 @needs_mfa
 def test_features_do_not_depend_on_earlier_alignments(aligner):
-    hello = (HELLO_WAV, get_audio_duration(HELLO_WAV), aligner.tokenize(HELLO_TEXT).normalized)
+    hello = (HELLO_WAV, 0.0, get_audio_duration(HELLO_WAV), aligner.tokenize(HELLO_TEXT).normalized)
 
     first = aligner._utterance(*hello)
     aligner.align(PLAYLIST_WAV, get_audio_duration(PLAYLIST_WAV), PLAYLIST_TEXT)
@@ -156,6 +178,17 @@ def test_full_request_through_the_app(app_client):
     assert body["scored_phone_count"] >= 3
     assert 0.0 <= body["resonance"]["median"] <= 1.0
     assert body["recognition"] == {"text": "Hello there, world.", "word_coverage": 1.0, "compared_words": 3}
+
+
+@needs_mfa
+def test_a_low_level_lead_in_does_not_move_the_scores(app_client, hello_after_lead_in):
+    plain = post_analyze(app_client, HELLO_WAV, HELLO_TEXT)
+    padded = post_analyze(app_client, hello_after_lead_in, HELLO_TEXT)
+
+    assert padded.status_code == plain.status_code == 200, padded.text
+    plain, padded = plain.json(), padded.json()
+    assert padded["pitch"]["median"] == pytest.approx(plain["pitch"]["median"], abs=5.0)
+    assert padded["resonance"]["balanced"] == pytest.approx(plain["resonance"]["balanced"], abs=0.05)
 
 
 @needs_mfa

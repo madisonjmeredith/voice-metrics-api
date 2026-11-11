@@ -23,6 +23,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+from app.converter import read_samples
+from app.speech_span import speech_span
+
 # Labels MFA emits for things that are not speech: praatio gaps, MFA's silence
 # word and phone, and the out-of-vocabulary word and phone.
 OOV_LABEL = "<unk>"
@@ -66,6 +69,7 @@ class Alignment:
     words: list[WordSpan]
     phones: list[PhoneSpan]
     oovs: list[str]
+    speech_span: Optional[tuple[float, float]] = None
 
     @property
     def speech_words(self) -> list[WordSpan]:
@@ -192,11 +196,11 @@ class LoadedAligner:
         tokenized = self._tokenizer(fold_accents(transcript, self._tokenizer))
         return Tokenized(tokenized.normalized_text, sorted(set(tokenized.oovs)))
 
-    def _utterance(self, wav_path: Path, duration: float, normalized: str):
+    def _utterance(self, wav_path: Path, begin: float, end: float, normalized: str):
         from kalpy.utterance import Segment
         from kalpy.utterance import Utterance as KalpyUtterance
 
-        utterance = KalpyUtterance(Segment(str(wav_path), 0.0, duration, 0), normalized)
+        utterance = KalpyUtterance(Segment(str(wav_path), begin, end, 0), normalized)
         # Kaldi seeds the model's dither from libc's rand(); without this each call gets a new draw.
         self._srand(DITHER_SEED)
         utterance.generate_mfccs(self._mfcc_computer)
@@ -259,11 +263,13 @@ class LoadedAligner:
         if not normalized.strip():
             raise EmptyTranscriptError("Transcript has no alignable words.")
 
-        utterance = self._utterance(wav_path, duration, normalized)
-        return _alignment_from_ctm(self._align_utterance(utterance, deadline), oovs)
+        span = speech_span(read_samples(wav_path))
+        begin, end = span or (0.0, duration)
+        utterance = self._utterance(wav_path, begin, end, normalized)
+        return _alignment_from_ctm(self._align_utterance(utterance, deadline), oovs, span)
 
 
-def _alignment_from_ctm(ctm, oovs: list[str]) -> Alignment:
+def _alignment_from_ctm(ctm, oovs: list[str], span: Optional[tuple[float, float]]) -> Alignment:
     words: list[WordSpan] = []
     phones: list[PhoneSpan] = []
     for word_index, interval in enumerate(ctm.word_intervals):
@@ -273,4 +279,4 @@ def _alignment_from_ctm(ctm, oovs: list[str]) -> Alignment:
             PhoneSpan(p.label, p.begin, p.end, word_index if word.is_speech else None)
             for p in interval.phones
         )
-    return Alignment(words=words, phones=phones, oovs=oovs)
+    return Alignment(words=words, phones=phones, oovs=oovs, speech_span=span)
