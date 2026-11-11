@@ -8,6 +8,7 @@ import time
 import numpy as np
 import pytest
 
+from app.aligner import AlignmentTimeout
 from app.converter import get_audio_duration
 from tests.conftest import FIXTURES, FS, needs_mfa, needs_whisper, post_analyze, use_token, write_wav
 from tests.textgrids import parse_textgrid
@@ -33,6 +34,15 @@ def test_aligns_hello(aligner):
     assert alignment.oovs == []
     assert alignment.speech_coverage(duration) > 0.7
     assert elapsed < ALIGN_BUDGET_SECONDS
+
+
+@needs_mfa
+def test_an_alignment_out_of_time_is_stopped_and_the_aligner_still_works(aligner):
+    duration = get_audio_duration(HELLO_WAV)
+    with pytest.raises(AlignmentTimeout):
+        aligner.align(HELLO_WAV, duration, HELLO_TEXT, budget=0)
+    alignment = aligner.align(HELLO_WAV, duration, HELLO_TEXT)
+    assert [w.label for w in alignment.speech_words] == ["hello", "there", "world"]
 
 
 @needs_mfa

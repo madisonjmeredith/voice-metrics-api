@@ -166,7 +166,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 | 504 | `decode_timeout` | true | ffmpeg ran longer than 5 seconds on the upload and was stopped |
 | 503 | `aligner_unavailable` | true | The aligner process died or didn't load within `WARMUP_TIMEOUT`, and a new one is starting |
 | 503 | `aligner_busy` | true | The aligner didn't reach the request within `ALIGN_TIMEOUT`, as during a restart. Nothing was restarted |
-| 504 | `alignment_timeout` | true | The request ran longer than `ALIGN_TIMEOUT` once the aligner reached it, so the aligner was restarted |
+| 504 | `alignment_timeout` | true | The request ran longer than `ALIGN_TIMEOUT` once the aligner reached it. The aligner stops a slow alignment itself and is restarted only when it doesn't answer |
 | 503 | `analyzer_unavailable` | true | A Praat worker process died and new ones are starting |
 | 404 | `not_found` | true | No route at that path |
 | 405 | `method_not_allowed` | true | The path exists but not for that method |

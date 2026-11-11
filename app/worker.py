@@ -12,11 +12,12 @@ the server finishes booting, and again while a failure response goes out
 after a restart.
 """
 
+import math
 import os
 from pathlib import Path
 from typing import Optional
 
-from app.aligner import Alignment, LoadedAligner, Tokenized
+from app.aligner import Alignment, AlignmentTimeout, LoadedAligner, Tokenized
 from app.converter import get_audio_duration
 from app.pool import WARMUP_TIMEOUT, WARMUP_WAV, SerialPool
 
@@ -24,13 +25,10 @@ MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/opt/mfa-models"))
 ACOUSTIC_DIR = MODEL_DIR / "acoustic" / "english_us_arpa"
 DICTIONARY_PATH = MODEL_DIR / "dictionary" / "english_us_arpa.dict"
 ALIGN_TIMEOUT = float(os.environ.get("ALIGN_TIMEOUT", "10"))
+ALIGN_MARGIN = 0.5
 WARMUP_TRANSCRIPT = "Hello there, world."
 
 _ALIGNER: Optional[LoadedAligner] = None
-
-
-class AlignmentTimeout(Exception):
-    """The call ran past the timeout once the worker picked it up; the worker has been restarted."""
 
 
 class AlignerUnavailable(Exception):
@@ -46,9 +44,11 @@ def _init(acoustic_dir: Path, dictionary_path: Path) -> None:
     _ALIGNER = LoadedAligner(acoustic_dir, dictionary_path)
 
 
-def _align(wav_path: Path, duration: float, transcript: str) -> Alignment:
+def _align(
+    wav_path: Path, duration: float, transcript: str, budget: float = math.inf
+) -> Alignment:
     assert _ALIGNER is not None
-    return _ALIGNER.align(wav_path, duration, transcript)
+    return _ALIGNER.align(wav_path, duration, transcript, budget)
 
 
 def _tokenize(texts: list[str]) -> list[Tokenized]:
@@ -81,7 +81,9 @@ class AlignerPool(SerialPool):
         return _align, (WARMUP_WAV, get_audio_duration(WARMUP_WAV), WARMUP_TRANSCRIPT)
 
     async def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
-        return await self._call(_align, wav_path, duration, transcript)
+        """Align in the worker, which stops a slow decode itself just before the pool would restart it."""
+        budget = self.timeout - ALIGN_MARGIN
+        return await self._call(_align, wav_path, duration, transcript, budget)
 
     async def tokenize(self, texts: list[str]) -> list[Tokenized]:
         """Normalize each text the way an alignment would."""
