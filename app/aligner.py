@@ -11,6 +11,7 @@ Everything from kalpy and MFA is imported lazily so the dataclasses and label
 sets here can be used on machines without the conda environment.
 """
 
+import ctypes
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ DEFAULT_BEAM = 10
 DEFAULT_RETRY_BEAM = 40
 WIDE_BEAM = 40
 WIDE_RETRY_BEAM = 160
+DITHER_SEED = 1
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,7 @@ class LoadedAligner:
         )
         # The property builds a fresh computer on each access, so hold one.
         self._mfcc_computer = self._acoustic_model.mfcc_computer
+        self._srand = ctypes.CDLL(None).srand
         self._cmvn_computer = CmvnComputer()
         self._aligners = (
             KalpyAligner(
@@ -188,20 +191,26 @@ class LoadedAligner:
         tokenized = self._tokenizer(fold_accents(transcript, self._tokenizer))
         return Tokenized(tokenized.normalized_text, sorted(set(tokenized.oovs)))
 
-    def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
-        from kalpy.exceptions import AlignerError
+    def _utterance(self, wav_path: Path, duration: float, normalized: str):
         from kalpy.utterance import Segment
         from kalpy.utterance import Utterance as KalpyUtterance
+
+        utterance = KalpyUtterance(Segment(str(wav_path), 0.0, duration, 0), normalized)
+        # Kaldi seeds the model's dither from libc's rand(); without this each call gets a new draw.
+        self._srand(DITHER_SEED)
+        utterance.generate_mfccs(self._mfcc_computer)
+        cmvn = self._cmvn_computer.compute_cmvn_from_features([utterance.mfccs])
+        utterance.apply_cmvn(cmvn)
+        return utterance
+
+    def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
+        from kalpy.exceptions import AlignerError
 
         normalized, oovs = self.tokenize(transcript)
         if not normalized.strip():
             raise EmptyTranscriptError("Transcript has no alignable words.")
 
-        utterance = KalpyUtterance(Segment(str(wav_path), 0.0, duration, 0), normalized)
-        utterance.generate_mfccs(self._mfcc_computer)
-        cmvn = self._cmvn_computer.compute_cmvn_from_features([utterance.mfccs])
-        utterance.apply_cmvn(cmvn)
-
+        utterance = self._utterance(wav_path, duration, normalized)
         last_error: Optional[Exception] = None
         for aligner in self._aligners:
             try:

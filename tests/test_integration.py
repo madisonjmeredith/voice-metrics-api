@@ -105,6 +105,17 @@ def test_aligns_words_the_release_dictionary_lacks(aligner):
 
 
 @needs_mfa
+def test_features_do_not_depend_on_earlier_alignments(aligner):
+    hello = (HELLO_WAV, get_audio_duration(HELLO_WAV), aligner.tokenize(HELLO_TEXT).normalized)
+
+    first = aligner._utterance(*hello)
+    aligner.align(PLAYLIST_WAV, get_audio_duration(PLAYLIST_WAV), PLAYLIST_TEXT)
+    again = aligner._utterance(*hello)
+
+    assert np.array_equal(again.mfccs.numpy(), first.mfccs.numpy())
+
+
+@needs_mfa
 def test_matches_checked_in_textgrid(aligner):
     live = aligner.align(HELLO_WAV, get_audio_duration(HELLO_WAV), HELLO_TEXT)
     stored = parse_textgrid(FIXTURES / "hello.TextGrid")
