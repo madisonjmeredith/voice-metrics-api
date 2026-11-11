@@ -30,6 +30,7 @@ Source is in `app/`, tests in `tests/`. Non-obvious parts:
 - `tests/test_aligner.py` and `tests/test_worker.py` run without MFA, over stand-ins.
 - `tests/test_analyzer_pool.py` runs without MFA too, over real Praat and a stand-in.
 - `tests/test_recognizer_pool.py` runs without the Whisper model over stand-ins, except one test that needs the model.
+- `tests/test_speech_span.py` runs the real Silero model, which faster-whisper ships, so it needs no MFA.
 - `spike/` holds scripts that aren't shipped: the timing script and the generators for the parity numbers, `cmudict.dict`, and the lockfiles.
 
 ## Decisions that were measured or negotiated, not defaulted
@@ -119,6 +120,39 @@ for the reload. 250 repeats of `it`, a 504 and a restart before, aligned in
 `max_active` was tried: at 1,000 or 3,000, 333 repeats of `it` still failed
 every beam, only faster, so it would turn the 504 into a 422 without aligning
 anything.
+
+**The aligner aligns only the speech span (#45).** MFA labels whatever audio
+it gets, so low-level sound ahead of the read pulled the first word over it.
+On `main`, `hello.wav` after 1 s of −40 dB noise (#45's clip shape) aligned
+"hello" from 0.0, and its pitch median went from 177.2 to 200.3 Hz and
+`balanced` from 0.553 to 0.896; over the span it reads 176.3 and 0.546.
+`speech_span` in `app/speech_span.py` runs Silero VAD (the model faster-whisper
+ships; onnxruntime was already locked), takes the first segment's start and
+the last segment's end, and pads each by `SPAN_PAD` inside the clip.
+`LoadedAligner.align` passes that slice to kalpy's `Segment`, so CMVN covers
+the slice too, and `update_utterance_boundaries` puts the phones back on clip
+time. Praat and the recognizer still get the whole file. A level threshold was
+the alternative: "within 25 dB of the loudest frame" put the start 0.1–0.4 s
+into the lead-in on six client takes with lead-ins near −40 dB, where Silero
+put it at the speech. `MIN_SILENCE_MS` is 100, Silero's upstream default,
+because faster-whisper's 2,000 runs the last segment to the end of any shorter
+tail. `SPAN_PAD` was 0.2 s first and cut the start of a sentence-initial S on
+one take, because Silero marks the onset at the vowel; at 0.3 s every replayed
+take keeps at least 60 ms before its first phone. A bigger pad lets more
+pre-speech sound back in, which #45's second clip had right up to the read.
+When Silero hears nothing (silence, a tone, takes peaking under about −35 dB),
+the whole clip is aligned as before and `speech_span` is None. Silero hears
+only the first 0.26 s of `_glottal_source`'s 1.5 s vowel, so a held vowel or a
+hum would be cut; every client prompt is a sentence, and the regression test
+pads `hello.wav` instead. Under emulation on November 10, 2026, Silero took
+0.2 s on a 58.8 s clip (0.69 s on a process's first call, which the warm-up
+pays), that clip's `aligner_ms` went from 347 to 468, and the aligner's RSS
+didn't grow (1,127–1,140 MB against `main`'s 1,174–1,177). Replaying the 21
+reference samples and 20 of the client's takes, all answered 200 before and
+after; the median pitch shift was 0.2 and 1.2 Hz (max 7.9), the median
+`balanced` shift 0.007 and 0.009 (max 0.055), and identical requests still
+returned identical bodies. Rerun that replay if `SPAN_PAD`, the VAD options, or
+the faster-whisper or onnxruntime version changes.
 
 **The lexicon check runs in the aligner process.**
 `POST /lexicon` calls `LoadedAligner.tokenize` through the pool, so its answer
@@ -530,7 +564,9 @@ phones does separate them: 0.78–0.82 for real reads, slow ones included,
 against 0.02–0.22 for tones and looped clips in issue #3's measurements. The
 service returns the number and the caller owns the floor, so it can be
 re-tuned without a redeploy. `spn` spans are excluded, so OOV words lower it.
-Speech-dense audio with the wrong words still reads high (0.73); catching that
+Since #45 the aligner can't stretch phones over a lead-in, which used to
+inflate it; the denominator is still the whole clip. Speech-dense audio
+with the wrong words still reads high (0.73); catching that
 needs recognition, not alignment. `suspicious`, a flag for a phone over 0.8 s
 or a word over 2 s, was removed in #17 because it caught none of #3's
 mismatched takes. Of 39 later takes it flagged one that `speech_coverage`
@@ -608,6 +644,11 @@ when the recognizer couldn't answer; `word_coverage` is null when every word is
 OOV. A null means unmeasured. Treat its names and shapes like the client's
 fields once something reads them.
 
+`/analyze`'s `speech_span` is `{start, end}`, the padded slice the aligner
+worked on, or null when Silero heard no speech and the whole clip was aligned
+(#45). `duration` and `speech_coverage` stay on the whole clip so the client's
+floor keeps its meaning.
+
 `/health` and `/ready` return `{version, status, aligner, analyzer, recognizer}`
 at 200 and 503. A probe's 503 is an answer, not an error, so it doesn't take the
 error shape below. The client calls neither.
@@ -666,7 +707,9 @@ the aligner and `kill -STOP` the new process: `/health` reads `stalled` once
 with `reason=warmup_timeout`.
 
 In the image ffmpeg lives in the conda environment, so a shell from `docker run --entrypoint sh`
-has no `ffmpeg` on its PATH. Sampling `/tmp` during a request with `docker exec <container> sh -c 'du -sk /tmp'`
+has no `ffmpeg` on its PATH. Nor does `docker exec <container> python` find Python; use
+`docker exec -w /app <container> /opt/conda/bin/python -c ...`. `docker run --rm -i <image> python -`
+works too, but without `-i` it silently ignores a script on stdin. Sampling `/tmp` during a request with `docker exec <container> sh -c 'du -sk /tmp'`
 in a loop takes about 100 ms a sample, so a request that finishes faster can be missed entirely.
 
 `pytest.ini` already passes `-q`, so adding another hides the summary line.

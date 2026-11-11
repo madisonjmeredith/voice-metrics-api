@@ -37,6 +37,7 @@ Query parameter `include_phones=1` adds `words` and `phones` to the response. Au
   "word_count": 9,
   "oovs": [],
   "speech_coverage": 0.78,
+  "speech_span": { "start": 0.01, "end": 4.62 },
   "recognition": { "text": "Hello there, how have you been this past week?", "word_coverage": 1.0, "compared_words": 9 },
   "pitch":     { "mean": 181.2, "median": 178.9, "stdev": 24.1, "min": 121.0, "max": 240.3, "unit": "Hz" },
   "resonance": { "mean": 0.58, "median": 0.57, "stdev": 0.11, "balanced": 0.61 },
@@ -55,6 +56,7 @@ Query parameter `include_phones=1` adds `words` and `phones` to the response. Au
 - `resonance.balanced` is the figure to use when comparing takes of different sentences or checking one against a fixed target. `mean` and `median` count every scored phone so they follow the sentence's mix of sounds as well as the voice. `balanced` averages each vowel and sonorant's mean score (`L`, `M`, `N`, `NG`, `R`, `W`, `Y`, and the vowels) and leaves out stops, fricatives, and affricates, whose midpoint formants aren't resonance. Across 23 voices with only the text varying, a voice's `median` moved by 0.31 of the spread between voices and its `balanced` by 0.18. Its values spread wider across voices than `median` does so a threshold tuned on `median` won't carry over.
 - `oovs` lists transcript words missing from the pronunciation dictionary. They are aligned as unknown and never scored. An accented word is missing only if its unaccented spelling is missing too (see [Accented words](#accented-words)). [`POST /lexicon`](#post-lexicon) checks a word before anything is recorded and [Adding a word](#adding-a-word) covers adding one.
 - `speech_coverage` is the share of the clip that sits under aligned speech phones, from 0 to 1. Silence and out-of-vocabulary words don't count toward it, so a transcript with entries in `oovs` reads lower. Check it for audio that didn't match the transcript. `word_count` can't tell you that because the aligner places every in-vocabulary word no matter what the audio holds. In the seven takes measured so far, a real read came back at 0.78 to 0.82 (slow reads included) and tones or looped clips at 0.02 to 0.22. The service reports the number and leaves the floor to you. It can't catch a clip that is dense with speech but has the wrong words (0.73 in the one case measured) because forced alignment has no way to tell which words were said. `recognition` covers that case.
+- `speech_span` is the stretch of the clip the aligner worked on, in seconds. It starts 0.3 seconds before the first speech a voice activity detector hears and ends 0.3 seconds after the last (never past either end of the clip). Words and phones land only inside it so low-level noise before or after the read can't be labeled as speech. It's `null` when the detector heard no speech at all, like silence, a tone, or a near-silent take. The whole clip is aligned in that case. `duration` and `speech_coverage` always cover the whole clip.
 - `recognition` is what a speech recognizer heard in the clip and how much of the transcript that covers. `text` is the recognizer's own transcription. `word_coverage` is the share of the transcript's words (from 0 to 1) that show up in that transcription in the same order. Case, punctuation, contractions, and spelled-out numbers don't count as differences. Words in `oovs` are left out because the recognizer has no reason to spell a name the way you did. Extra words cost nothing. A stumble or a repeated phrase doesn't lower it. `compared_words` is how many transcript words it was measured over after normalization, where a contraction counts as two.
 - Use `word_coverage` and `speech_coverage` together. Missing or wrong words lower `word_coverage` and extra speech the transcript doesn't cover lowers `speech_coverage`. In the takes measured so far, the lowest genuine read was 0.667 (a tongue twister the recognizer "corrected") and the next 0.8. A read of a different prompt topped out at 0.5. That was two greetings that share half their words. As with `speech_coverage`, the floor is yours.
 - `word_coverage` is `null` when every transcript word is out of vocabulary. `recognition` itself is `null` when the recognizer couldn't answer in time or is restarting. The rest of the response is still scored. Treat a `null` as unmeasured instead of as a mismatch.
@@ -174,9 +176,7 @@ An unhandled exception comes back as a plain-text 500 with no `retryable` at all
 ## How it works
 
 1. `ffmpeg` transcodes the upload to 16 kHz mono 16-bit PCM WAV. It stops a second past 60 seconds, so a longer upload is refused without being decoded in full.
-2. MFA's `english_us_arpa` model aligns the transcript, giving a start and end
-   for every word and ARPAbet phone. The model is loaded once, in a dedicated
-   worker process, and reused.
+2. Silero VAD (the copy that ships with faster-whisper) finds where the speech starts and ends. MFA's `english_us_arpa` model then aligns the transcript over that span plus 0.3 seconds on each side, giving a start and end for every word and ARPAbet phone. MFA labels whatever audio it's handed. Without the span, low-level noise before the read gets the first word stretched over it. A loudness threshold can't find the span because a lead-in like that can sit within 25 dB of the speech. When Silero hears no speech, the whole clip is aligned. Both models are loaded once in a dedicated worker process and reused.
 3. After alignment, Praat (via parselmouth) computes a Pitch object (75 to 600 Hz) and a Burg Formant object (5 formants, 5000 Hz ceiling) and reads both at each phone's midpoint. It runs in its own pool of worker processes because parselmouth holds Python's GIL for a whole analysis and would stall every other request until it finished.
 4. Readings more than two standard deviations from the clip mean are dropped
    per formant. Each remaining phone's F1–F3 are z-scored against the
@@ -358,6 +358,8 @@ A request line has the status, the error `code` if there was one, and the time e
 - `recognizer_wait_ms`: waiting out a recognizer reload and the recognition ahead
 - `recognizer_ms`: the recognition
 
+Once the alignment is done, an `/analyze` line also carries `speech_start_s` and `speech_end_s` (the `speech_span` rounded to hundredths) when the detector heard speech.
+
 A scored `/analyze` line also carries `recognition=`. It's `ok` followed by `word_coverage` and `compared_words`, or the reason the figure is null: `recognizer_busy`, `recognition_timeout`, or `recognizer_unavailable`. Those three are reasons on a 200 and never error codes.
 
 A `praat_wait_ms` that keeps growing under load means `ANALYZER_WORKERS` is too low. An unhandled exception adds `error=` with the exception's class. `/health` and `/ready` stay out of the log unless they answer 503.
@@ -406,4 +408,4 @@ Then build the `test` stage and run the suite in it, as in [Tests](#tests). Read
 - `praat-parselmouth`, which takes the pitch and formant readings
 - `kaldi`, `kalpy`, and `montreal-forced-aligner`, which do the alignment
 - `libblas`, `liblapack`, and `libopenblas`, which Kaldi's matrix code calls
-- `faster-whisper` and `ctranslate2` (in `requirements.lock`), which do the recognition
+- `faster-whisper`, `ctranslate2`, and `onnxruntime` (in `requirements.lock`), which do the recognition and find the speech span the aligner works on
