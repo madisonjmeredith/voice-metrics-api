@@ -29,9 +29,13 @@ def _no_init(acoustic_dir: Path, dictionary_path: Path) -> None:
     pass
 
 
-def _fake_align(wav_path: Path, duration: float, transcript: str) -> str:
+def _fake_align(wav_path: Path, duration: float, transcript: str, budget=None) -> object:
     if transcript == "fail":
         raise RuntimeError("bad dictionary")
+    if transcript == "stopped":
+        raise AlignmentTimeout("The alignment ran out of time and was stopped")
+    if transcript == "budget":
+        return budget
     if transcript == "hang":
         time.sleep(60)
     if transcript == "slow":
@@ -118,6 +122,23 @@ def test_calls_queued_behind_a_timeout_fail_without_a_second_restart(pool, caplo
     assert after == "ready"
     [line] = pool_lines(caplog)
     assert re.fullmatch(r"aligner restart reason=alignment_timeout uptime_s=\d+\.\d", line)
+
+
+def test_an_alignment_the_worker_stops_itself_restarts_nothing(pool, caplog):
+    async def scenario():
+        with pytest.raises(AlignmentTimeout):
+            await pool.align(WAV, 0.0, "stopped")
+        return await pool.align(WAV, 0.0, "ready")
+
+    assert asyncio.run(scenario()) == "ready"
+    assert pool.restarts == 0
+    assert pool_lines(caplog) == []
+
+
+def test_the_worker_stops_an_alignment_before_the_pool_would(pool):
+    pool.timeout = 2.0
+    budget = asyncio.run(pool.align(WAV, 0.0, "budget"))
+    assert 0 < budget < pool.timeout
 
 
 def test_a_lexicon_check_that_runs_too_long_restarts_the_worker(pool):

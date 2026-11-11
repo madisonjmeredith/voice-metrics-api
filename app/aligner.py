@@ -6,13 +6,18 @@ is what keeps a request to about a second. MFA's own `align_one` command does
 the same work but re-extracts the model and recompiles the lexicon on every
 call; this module mirrors its internals
 (montreal_forced_aligner/command_line/align_one.py) without that overhead.
+The decode itself mirrors kalpy's gmm_align_compiled (Kaldi's
+AlignUtteranceWrapper) a chunk of frames at a time, so a deadline can stop a
+slow one without killing the process.
 
 Everything from kalpy and MFA is imported lazily so the dataclasses and label
 sets here can be used on machines without the conda environment.
 """
 
 import ctypes
+import math
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,10 +28,8 @@ from typing import NamedTuple, Optional
 OOV_LABEL = "<unk>"
 NON_SPEECH_LABELS = frozenset({"", "<eps>", "sil", "sp", "spn", OOV_LABEL})
 
-DEFAULT_BEAM = 10
-DEFAULT_RETRY_BEAM = 40
-WIDE_BEAM = 40
-WIDE_RETRY_BEAM = 160
+BEAMS = (10, 40, 160)
+CHUNK_FRAMES = 25
 DITHER_SEED = 1
 
 
@@ -111,6 +114,10 @@ class AlignmentError(Exception):
     """MFA could not align the transcript to the audio, even with a wide beam."""
 
 
+class AlignmentTimeout(Exception):
+    """The alignment ran past its time; the worker was restarted only if it didn't stop on its own."""
+
+
 class EmptyTranscriptError(ValueError):
     """Nothing was left of the transcript after normalization."""
 
@@ -175,16 +182,10 @@ class LoadedAligner:
         self._mfcc_computer = self._acoustic_model.mfcc_computer
         self._srand = ctypes.CDLL(None).srand
         self._cmvn_computer = CmvnComputer()
-        self._aligners = (
-            KalpyAligner(
-                self._acoustic_model, self._lexicon,
-                beam=DEFAULT_BEAM, retry_beam=DEFAULT_RETRY_BEAM,
-            ),
-            KalpyAligner(
-                self._acoustic_model, self._lexicon,
-                beam=WIDE_BEAM, retry_beam=WIDE_RETRY_BEAM,
-            ),
-        )
+        aligner = KalpyAligner(self._acoustic_model, self._lexicon)
+        self._graph_compiler = aligner.graph_compiler
+        # kalpy aligns with the alignment model whenever there's no fMLLR transform, as here.
+        self._gmm = aligner.ali_aligner if aligner.ali_aligner is not None else aligner.aligner
 
     def tokenize(self, transcript: str) -> Tokenized:
         """Normalize a transcript the way MFA will; returns (text, oov words)."""
@@ -203,23 +204,63 @@ class LoadedAligner:
         utterance.apply_cmvn(cmvn)
         return utterance
 
-    def align(self, wav_path: Path, duration: float, transcript: str) -> Alignment:
-        from kalpy.exceptions import AlignerError
+    def _align_utterance(self, utterance, deadline: float):
+        from _kalpy.decoder import FasterDecoder, FasterDecoderOptions
+        from _kalpy.fstext import GetLinearSymbolSequence
+        from _kalpy.gmm import DecodableAmDiagGmmScaled
+        from _kalpy.hmm import AddTransitionProbs
+        from kalpy.gmm.data import Alignment as KalpyAlignment
 
+        gmm = self._gmm
+        features = utterance.generate_features(self._acoustic_model)
+        graph = self._graph_compiler.compile_fst(utterance.transcript)
+        if graph.NumStates() == 0:
+            # FasterDecoder asserts on a graph with no start state, and the assert is abort().
+            raise AlignmentError("The transcript compiled to an empty graph.")
+        AddTransitionProbs(
+            gmm.transition_model, [], gmm.transition_scale, gmm.self_loop_scale, graph
+        )
+        decodable = DecodableAmDiagGmmScaled(
+            gmm.acoustic_model, gmm.transition_model, features, gmm.acoustic_scale
+        )
+        options = FasterDecoderOptions()
+        for beam in BEAMS:
+            options.beam = beam
+            decoder = FasterDecoder(graph, options)
+            decoder.InitDecoding()
+            while decoder.NumFramesDecoded() < features.NumRows():
+                if time.monotonic() >= deadline:
+                    raise AlignmentTimeout("The alignment ran out of time and was stopped")
+                decoder.AdvanceDecoding(decodable, CHUNK_FRAMES)
+            if decoder.ReachedFinal():
+                break
+        else:
+            raise AlignmentError(
+                f"Could not align the transcript to the audio with a beam of {BEAMS[-1]}."
+            )
+
+        _, path = decoder.GetBestPath()
+        transition_ids, words, _ = GetLinearSymbolSequence(path)
+        phones = KalpyAlignment("", transition_ids, words).generate_ctm(
+            gmm.transition_model, self._lexicon.phone_table, self._mfcc_computer.frame_shift
+        )
+        ctm = self._lexicon.phones_to_pronunciations(
+            words, phones, transcription=False, text=utterance.transcript
+        )
+        ctm.update_utterance_boundaries(utterance.segment.begin, utterance.segment.end)
+        return ctm
+
+    def align(
+        self, wav_path: Path, duration: float, transcript: str, budget: float = math.inf
+    ) -> Alignment:
+        """Align, raising AlignmentTimeout once decoding runs past budget seconds from the call."""
+        deadline = time.monotonic() + budget
         normalized, oovs = self.tokenize(transcript)
         if not normalized.strip():
             raise EmptyTranscriptError("Transcript has no alignable words.")
 
         utterance = self._utterance(wav_path, duration, normalized)
-        last_error: Optional[Exception] = None
-        for aligner in self._aligners:
-            try:
-                ctm = aligner.align_utterance(utterance)
-            except AlignerError as e:
-                last_error = e
-                continue
-            return _alignment_from_ctm(ctm, oovs)
-        raise AlignmentError(str(last_error))
+        return _alignment_from_ctm(self._align_utterance(utterance, deadline), oovs)
 
 
 def _alignment_from_ctm(ctm, oovs: list[str]) -> Alignment:
