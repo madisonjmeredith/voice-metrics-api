@@ -50,8 +50,10 @@ both probes report `warming` until that finishes.
 Each call gets `ALIGN_TIMEOUT` (10 s) twice (#18): once to reach its turn,
 which covers the warm-up and the calls ahead, and once to run. Running out of
 the first answers `aligner_busy` and restarts nothing. Running out of the
-second restarts the worker and answers `alignment_timeout`, for `/analyze` and
-`/lexicon` alike. Before #18 one clock started at queueing, a reload under
+second answers `alignment_timeout`, for `/analyze` and `/lexicon` alike. An
+alignment stops itself just before that and restarts nothing (#40, below);
+the pool restarts the worker only when a call doesn't answer in time, such
+as a lexicon check that hangs. Before #18 one clock started at queueing, a reload under
 emulation (about 11.5 s) outlasted it, and each request that arrived after a
 restart killed the reload and started another: after one worker kill, 1
 request per second failed 54 of 54 and a serial client 8 of 8 until traffic
@@ -84,6 +86,39 @@ zeros that land on Kaldi's log floor without dither.
 `test_features_do_not_depend_on_earlier_alignments` compares features, not
 alignments, because a boundary moves only now and then. It fails if Kaldi
 stops drawing from libc's `rand()`.
+
+**The aligner stops a slow decode itself (#40).** A transcript that repeats
+one short word a few hundred times gives the decoder a graph where nearly
+every position scores the same, so a wide beam prunes almost nothing. Against
+a 58.8 s clip under emulation (November 10, 2026), one pass over such a
+transcript took 0.6–1.5 s at beam 10, 5–10 s at beam 40, and 12–22 s at beam
+160. The clip's own words aligned at beam 10 in 0.07 s, and real words
+repeated to 741 failed every beam in under 0.8 s. kalpy's `gmm_align_compiled`
+runs a whole decode in C++, so the only way to stop one was to kill the
+worker, which costs a reload. `LoadedAligner._align_utterance` runs the same steps by
+hand, as Kaldi's `AlignUtteranceWrapper` does them (transition probabilities
+on the compiled graph, `DecodableAmDiagGmmScaled`, `FasterDecoder`), but
+`CHUNK_FRAMES` at a time. Between chunks it raises `AlignmentTimeout` once the
+budget `AlignerPool.align` passes runs out: `ALIGN_TIMEOUT` less
+`ALIGN_MARGIN` (0.5 s), so the worker answers before the pool's clock does.
+The caller gets the same 504 `alignment_timeout`, and nothing restarts. At the
+slowest rate measured (3.7 ms a frame), a chunk overshoots by about 0.1 s. An
+alignment that needs between 9.5 and 10 s now gets the 504 instead of a 200;
+genuine takes align in under a second. Raising the pool's clock instead would
+push the worst case past the client's 30 s. The beams run 10, 40, 160 on one
+graph. The two `KalpyAligner`s this replaced ran 10 then 40, and 40 then 160,
+and the second 40 repeated the first exactly. Per-frame likelihoods only fed
+the CTM's `confidence`, which nothing reads, so they're left out. Replaying
+the 22 takes through `/analyze` with `include_phones=1` returned the same
+bodies byte for byte as before, every take aligning at beam 10; rerun that
+replay if kalpy or the beams change. On a 58.8 s `say` clip, 333 repeats of
+`it` and 2,000 of `a` now get the 504 at about 9.6 s from the same aligner
+process. Before, the slow ones restarted it, and the next take waited 7.6 s
+for the reload. 250 repeats of `it`, a 504 and a restart before, aligned in
+7.4 s without the repeated pass. Capping
+`max_active` was tried: at 1,000 or 3,000, 333 repeats of `it` still failed
+every beam, only faster, so it would turn the 504 into a 422 without aligning
+anything.
 
 **The lexicon check runs in the aligner process.**
 `POST /lexicon` calls `LoadedAligner.tokenize` through the pool, so its answer
@@ -260,8 +295,8 @@ bound alignment time. A repeated short word aligns slowly: against a 59 s
 clip, 200 repeats of `it` aligned in 0.8 s, 250 in 6.9 s, and 333 ran past
 `ALIGN_TIMEOUT` and restarted the worker, while 741 real words failed
 (`alignment_failed`) in 1.6 s. That cliff sits inside the word count of an
-honest 60 s read, so no length cap can remove it; `ALIGN_TIMEOUT` and one
-restart are what bound it.
+honest 60 s read, so no length cap can remove it; the aligner's own deadline
+(#40) is what bounds it.
 
 **Recognition reports how much of the transcript was heard (#25).** Forced
 alignment places every in-vocabulary word whatever the audio holds, so a fluent
