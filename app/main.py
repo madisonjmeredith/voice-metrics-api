@@ -285,6 +285,10 @@ def _phone_payload(phone: MeasuredPhone) -> dict:
     }
 
 
+def _span_payload(span: Optional[tuple[float, float]]) -> Optional[dict]:
+    return None if span is None else {"start": _round(span[0], 3), "end": _round(span[1], 3)}
+
+
 def _word_payload(alignment: Alignment) -> list[dict]:
     return [
         {"word": w.label, "start": _round(w.start, 3), "end": _round(w.end, 3)}
@@ -361,6 +365,9 @@ async def analyze(
         try:
             alignment = await app.state.aligner.align(wav_path, duration, transcript)
             note(words=len(alignment.speech_words), oovs=len(alignment.oovs))
+            if span := alignment.speech_span:
+                start, end = span
+                note(speech_start_s=round(start, 2), speech_end_s=round(end, 2))
             phones = await app.state.analyzer.measure(wav_path, alignment)
             aggregates = score(phones)
             if aggregates["readings"]["balanced"] < MIN_SCORED_PHONES:
@@ -384,6 +391,7 @@ async def analyze(
         "word_count": len(alignment.speech_words),
         "oovs": alignment.oovs,
         "speech_coverage": round(alignment.speech_coverage(duration), 3),
+        "speech_span": _span_payload(alignment.speech_span),
         "recognition": recognition,
         "pitch": {**_round_stats(aggregates["pitch"]), "unit": "Hz"},
         "resonance": _round_stats(aggregates["resonance"], 4),

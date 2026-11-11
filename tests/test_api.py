@@ -7,6 +7,7 @@ without a conda environment.
 """
 
 import asyncio
+import dataclasses
 import logging
 import re
 from pathlib import Path
@@ -143,6 +144,7 @@ def test_analyze_returns_prosody_compatible_aggregates(client, vowel_a):
     assert body["word_count"] == 1
     assert body["oovs"] == []
     assert body["speech_coverage"] == pytest.approx(0.867, abs=0.001)
+    assert body["speech_span"] is None
     assert set(body["pitch"]) == {"mean", "median", "stdev", "min", "max", "unit"}
     assert body["pitch"]["mean"] == pytest.approx(140.0, abs=3.0)
     assert set(body["resonance"]) == {"mean", "median", "stdev", "balanced"}
@@ -167,6 +169,17 @@ def test_include_phones_adds_detail(client, vowel_a):
     }
     assert first["word_index"] == 1
     assert len(first["z"]) == 4
+
+
+@needs_ffmpeg
+def test_the_aligned_speech_span_is_reported_and_logged(client, vowel_a, logs):
+    alignment = dataclasses.replace(vowel_alignment(), speech_span=(0.0412, 1.4987))
+    with client(FakeAligner(alignment)) as c:
+        body = post_analyze(c, vowel_a).json()
+
+    assert body["speech_span"] == {"start": 0.041, "end": 1.499}
+    [line] = request_lines(logs)
+    assert " speech_start_s=0.04 speech_end_s=1.5 " in line.getMessage()
 
 
 @needs_ffmpeg
