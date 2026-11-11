@@ -63,6 +63,28 @@ reload got from any timeout before. The load has not been measured on native
 amd64; the aligner's `ready` log line carries `load_s`, so the first native run
 will show it.
 
+**Each alignment reseeds Kaldi's dither (#28).** The model's `meta.json` sets
+`dither` to 1, and Kaldi's `Dither()` seeds a `RandomState` per frame from
+libc's global `rand()`. Because the worker outlives requests, each alignment
+used to start wherever the last one left `rand()`. Replaying 22 takes (`hello.wav` and
+the 21 sample recordings) four times each against `main`, 20 got at least two
+different bodies and one pitch median moved by 6.2 Hz. kalpy exposes no seed,
+but `libkaldi-base` imports `rand` and `rand_r` from libc, so
+`LoadedAligner._utterance` calls libc's `srand` through ctypes right before
+`generate_mfccs`. Seeding once at load wouldn't help, since every extraction
+moves the state; anything else that extracts features needs the same reseed.
+With it all 22 takes returned one body four times, and the figures fell
+inside `main`'s spread (under emulation, November 10, 2026). The seed
+reproduces neither a fresh process nor `mfa align_one`, because imports and
+the model load call `rand()` first, so `hello.TextGrid` keeps its tolerance.
+`dither = 0` was rejected because the model was trained with dither. On
+`warmup.wav` it moved the features by 0.78 per coefficient on average, where a
+different draw moves them by 0.70, and 2.7% of that clip's samples are exact
+zeros that land on Kaldi's log floor without dither.
+`test_features_do_not_depend_on_earlier_alignments` compares features, not
+alignments, because a boundary moves only now and then. It fails if Kaldi
+stops drawing from libc's `rand()`.
+
 **The lexicon check runs in the aligner process.**
 `POST /lexicon` calls `LoadedAligner.tokenize` through the pool, so its answer
 is what an alignment would do by construction, and a change to `tokenize`
@@ -265,7 +287,10 @@ left 29 under 0.9 and one at 0.208. Two takes that pass every floor read 0 on
 all three: a near-silent one (-51 dB) and full-scale non-speech at 0.93
 `speech_coverage`. 54 of the 57 mismatched pairs clear the client's 0.3
 `speech_coverage` floor. Replayed through the built service, 114 of 115 figures
-matched the spike exactly and one moved by 0.015 (#28). A hosted recognizer was
+matched the spike exactly and one moved by 0.015. That isn't #28's dither:
+`word_coverage` reads only the aligned words' labels, identical requests
+return the same `recognition` (22 takes, four requests each, November 10,
+2026), and the cause wasn't found. A hosted recognizer was
 rejected because each take's audio and a transcript that often carries a first
 name would leave the server. base.en is the upgrade if a real threshold turns
 out tight.
@@ -582,12 +607,12 @@ The parity test in `tests/test_scoring.py` pins this port to the reference
 implementation's numbers. Regenerate them with `spike/parity_expected.py` if
 `tests/parity_data.py` changes, and only then.
 
-Identical `/analyze` requests to the same container can return different
-pitch, formant, and resonance figures (#28), so comparing a new image's output
-byte for byte against an older container can't show that an aggregation change
-left existing figures alone. Recompute `mean`, `median`, and `stdev` from the
-same response's `include_phones=1` phones (those with a resonance that aren't
-outliers) and check they match it.
+Since #28, identical `/analyze` requests to one container return identical
+bodies, so two images built after it can be compared byte for byte when
+nothing between them should move a figure. An image from before #28 returns a
+different draw on most requests. Against one of those, recompute `mean`,
+`median`, and `stdev` from the same response's `include_phones=1` phones
+(those with a resonance that aren't outliers) and check they match it.
 
 A container started by hand from the image (load tests, the worker-loss reproduction below)
 exits with code 3 unless it gets `-e ALLOW_UNAUTHENTICATED=1` or `-e API_TOKEN=...`. Under
