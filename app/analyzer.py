@@ -3,17 +3,21 @@ Praat-based pitch and formant measurement using parselmouth.
 
 Adapted from formantry's analyzer. The analysis parameters are the ones the
 reference project's textgrid-formants.praat used when it built stats.json,
-and they are kept for parity with that data rather than tuned.
+and they are kept for parity with that data rather than tuned. The one
+departure: a pitch reading far under the clip's median is taken from a second
+pass whose floor rules out the octave below the speaker.
 """
 
 import math
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import parselmouth
 
 PITCH_FLOOR = 75.0
 PITCH_CEILING = 600.0
+SPEAKER_FLOOR_RATIO = 0.6
 
 # Burg formant settings from the reference Praat script:
 # To Formant (burg)... 0 5 5000 0.025 50
@@ -31,16 +35,26 @@ def _finite(value: float) -> Optional[float]:
     return None if math.isnan(value) else value
 
 
+def track_pitch(sound: parselmouth.Sound, floor: float) -> parselmouth.Pitch:
+    return sound.to_pitch(time_step=None, pitch_floor=floor, pitch_ceiling=PITCH_CEILING)
+
+
+def speaker_floor(frequencies: np.ndarray) -> float:
+    """SPEAKER_FLOOR_RATIO of the median voiced frame, never under PITCH_FLOOR."""
+    voiced = frequencies[frequencies > 0]
+    return max(PITCH_FLOOR, SPEAKER_FLOOR_RATIO * float(np.median(voiced))) if voiced.size else PITCH_FLOOR
+
+
 class AudioAnalyzer:
     """Pitch and formant tracks for one WAV, queried at arbitrary times."""
 
     def __init__(self, audio_path: Path) -> None:
         sound = parselmouth.Sound(str(audio_path))
-        self._pitch = sound.to_pitch(
-            time_step=None,
-            pitch_floor=PITCH_FLOOR,
-            pitch_ceiling=PITCH_CEILING,
-        )
+        self._pitch = track_pitch(sound, PITCH_FLOOR)
+        frequencies = self._pitch.selected_array["frequency"]
+        self.pitch_floor = speaker_floor(frequencies)
+        self._low = (frequencies > 0) & (frequencies < self.pitch_floor)
+        self._reread = track_pitch(sound, self.pitch_floor) if self._low.any() else self._pitch
         self._formant = sound.to_formant_burg(
             time_step=None,
             max_number_of_formants=MAX_FORMANTS,
@@ -49,9 +63,16 @@ class AudioAnalyzer:
             pre_emphasis_from=PRE_EMPHASIS_FROM,
         )
 
+    def _reads_low(self, time: float) -> bool:
+        """Whether either first-pass frame a linear read at `time` draws on is under the floor."""
+        left = math.floor(self._pitch.get_frame_number_from_time(time))
+        return bool(self._low[max(left - 1, 0) : max(left + 1, 0)].any())
+
     def get_pitch_at(self, time: float) -> Optional[float]:
         """F0 in Hz at `time`, or None where Praat found no voicing."""
-        value = _finite(self._pitch.get_value_at_time(time))
+        # Only low readings come from the second pass: its shorter window moves in-range readings too.
+        pitch = self._reread if self._reads_low(time) else self._pitch
+        value = _finite(pitch.get_value_at_time(time))
         return None if value == 0 else value
 
     def get_formants_at(self, time: float) -> list[Optional[float]]:

@@ -8,6 +8,7 @@ tests/fixtures/README.md.
 """
 
 import logging
+import math
 import shutil
 import time
 import wave
@@ -49,9 +50,7 @@ def _resonator(x: np.ndarray, freq: float, bandwidth: float) -> np.ndarray:
     return y
 
 
-def _glottal_source(n_samples: int, f0: float) -> np.ndarray:
-    x = np.zeros(n_samples)
-    x[:: int(FS / f0)] = 1.0
+def _integrate(x: np.ndarray) -> np.ndarray:
     for _ in range(2):
         y = np.zeros_like(x)
         for n in range(len(x)):
@@ -60,12 +59,31 @@ def _glottal_source(n_samples: int, f0: float) -> np.ndarray:
     return x
 
 
-def vowel_signal(f0: float, formants: list[float], seconds: float) -> np.ndarray:
-    signal = _glottal_source(int(FS * seconds), f0)
+def _glottal_source(n_samples: int, f0: float) -> np.ndarray:
+    x = np.zeros(n_samples)
+    x[:: int(FS / f0)] = 1.0
+    return _integrate(x)
+
+
+def _shape(source: np.ndarray, formants: list[float]) -> np.ndarray:
     for freq, bandwidth in zip(formants, BANDWIDTHS):
-        signal = _resonator(signal, freq, bandwidth)
-    signal = np.diff(signal, prepend=0.0)
+        source = _resonator(source, freq, bandwidth)
+    signal = np.diff(source, prepend=0.0)
     return signal / np.max(np.abs(signal)) * 0.8
+
+
+def vowel_signal(f0: float, formants: list[float], seconds: float) -> np.ndarray:
+    return _shape(_glottal_source(int(FS * seconds), f0), formants)
+
+
+def pulse_vowel(seconds: float, f0_at, doubled_from: float = math.inf) -> np.ndarray:
+    """/a/ on pulses at f0_at(t) Hz; from doubled_from on, every other pulse is weaker, doubling the period."""
+    x = np.zeros(int(FS * seconds))
+    t, k = 0.0, 0
+    while (i := int(t * FS)) < len(x):
+        x[i] = 0.4 if t >= doubled_from and k % 2 else 1.0
+        t, k = t + 1.0 / f0_at(t), k + 1
+    return _shape(_integrate(x), VOWEL_A)
 
 
 def write_wav(path: Path, signal: np.ndarray) -> Path:
