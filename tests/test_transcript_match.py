@@ -3,7 +3,15 @@ import time
 import pytest
 
 from app.aligner import NON_SPEECH_LABELS, OOV_LABEL, Alignment, WordSpan
-from app.transcript_match import normalize, transcript_words, word_coverage
+from app.transcript_match import (
+    Token,
+    compare,
+    matched,
+    normalize,
+    transcript_tokens,
+    transcript_words,
+    word_coverage,
+)
 
 
 def aligned(text: str) -> Alignment:
@@ -15,6 +23,13 @@ def aligned(text: str) -> Alignment:
 
 def coverage(aligned_text: str, heard: str):
     return word_coverage(transcript_words(aligned(aligned_text)), normalize(heard))
+
+
+def marks(aligned_text: str, heard: str) -> list[tuple[str, object]]:
+    """Each aligned speech word with whether it was heard, or None when it gave no token."""
+    alignment = aligned(aligned_text)
+    heard_map = compare(alignment, heard).heard
+    return [(w.label, heard_map.get(i)) for i, w in enumerate(alignment.words) if w.is_speech]
 
 
 def test_a_read_of_the_transcript_is_all_heard():
@@ -82,3 +97,60 @@ def test_a_long_comparison_stays_quick():
     started = time.perf_counter()
     word_coverage(transcript, heard)
     assert time.perf_counter() - started < 0.25
+
+
+def test_a_spelled_out_number_comes_from_every_word_in_it():
+    assert transcript_tokens(aligned("i counted twenty five sheep")) == [
+        Token("i", frozenset({1})),
+        Token("counted", frozenset({2})),
+        Token("25", frozenset({3, 4})),
+        Token("sheep", frozenset({5})),
+    ]
+
+
+def test_a_contraction_gives_its_word_two_tokens():
+    assert transcript_tokens(aligned("i don't")) == [
+        Token("i", frozenset({1})),
+        Token("do", frozenset({2})),
+        Token("not", frozenset({2})),
+    ]
+
+
+def test_token_indices_count_the_words_before_an_oov_word():
+    assert transcript_tokens(aligned(f"hi {OOV_LABEL} there")) == [
+        Token("hi", frozenset({1})),
+        Token("there", frozenset({3})),
+    ]
+
+
+def test_a_read_that_stops_early_leaves_the_rest_unheard():
+    assert marks("the quick brown fox jumps over the lazy dog", "The quick brown fox.") == [
+        ("the", True), ("quick", True), ("brown", True), ("fox", True),
+        ("jumps", False), ("over", False), ("the", False), ("lazy", False), ("dog", False),
+    ]
+
+
+def test_every_word_of_a_misheard_number_is_unheard():
+    assert marks("twenty five sheep", "Twenty six sheep.") == [
+        ("twenty", False), ("five", False), ("sheep", True),
+    ]
+
+
+def test_a_word_is_heard_only_when_all_its_tokens_are():
+    assert marks("i don't know", "I do know.") == [("i", True), ("don't", False), ("know", True)]
+
+
+def test_a_word_that_normalizes_to_nothing_is_not_marked():
+    assert marks("um hello there", "Hello there.") == [("um", None), ("hello", True), ("there", True)]
+
+
+def test_ties_keep_the_earliest_transcript_words():
+    assert matched(["a", "b", "a"], ["a"]) == [True, False, False]
+    assert matched(["the", "cat", "the", "dog"], ["the", "dog"]) == [True, False, False, True]
+
+
+def test_comparison_counts_the_same_coverage_as_word_coverage():
+    alignment, heard = aligned("hi i'm sam nice to meet you"), "Hi, I'm Sam. Nice to see you."
+    comparison = compare(alignment, heard)
+    assert comparison.compared_words == len(transcript_words(alignment)) == 8
+    assert comparison.word_coverage == word_coverage(transcript_words(alignment), normalize(heard)) == 7 / 8
