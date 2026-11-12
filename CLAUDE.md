@@ -406,6 +406,33 @@ MFA's `transcription.models` imports faster-whisper whenever it's installed,
 so the aligner process maps CTranslate2 too. It costs nothing measurable: the
 aligner held 1,350 MB with it and 1,360 MB without, and loaded as fast.
 
+**Scores count every aligned word, heard or not (#42).** `compare` in
+`app/transcript_match.py` marks which aligned words the recognizer heard
+(`words[].heard` under `include_phones`), and scoring ignores the marks on
+purpose. Each aligned word is normalized on its own and diffed against its
+run's normalization, so a merged number (`twenty five` to `25`) belongs to
+every word in it and a contraction's two tokens to one word. A word is heard
+only when all its tokens matched, and LCS ties keep the earliest transcript
+words. `spike/heard_scoring.py` tried two ways of using the marks over 41 takes
+(the reference project's 21 samples and 20 client takes) under emulation on
+November 11, 2026. Its partial reads cut the second half or the middle third of
+a take's words out of its audio, and each one's truth is the cut audio aligned
+with only the words it holds. Leaving the unheard words' phones out brought no
+partial read closer: given the whole transcript, the aligner squeezes every
+word into the audio there is, so the heard words sit over the wrong audio too
+(on one take "friends" landed at 1.73 s and was said at 2.35 s). Aligning again
+with only the heard words did help (median error with the middle third cut:
+pitch 2.8 to 0.5 Hz, `balanced` 0.042 to 0.008). But it moved the 22 genuine
+takes with a misheard word by a median 1.1 Hz and 0.010 of resonance median
+(max 13.2 Hz), it would run recognition, a second alignment, and Praat one
+after another, and the scores would then depend on the recognizer answering.
+It wasn't worth that, because most partial reads never score (39 of 72 failed
+alignment) and `word_coverage` separates the rest: partial reads that aligned
+read 0.31 to 0.72, genuine reads 0.82 and up apart from a tongue twister at
+0.67, and reads of another take's prompt 0 to 0.25. A floor on `word_coverage`
+in the client is the fix. The spike's partial reads are synthetic cuts;
+revisit with real partial takes that align and pass such a floor.
+
 **`mfa align_one` needs no database.** Its code path (mirrored in
 `aligner.py`) never opens MFA's SQLAlchemy session. Do not add `mfa server`
 or PostgreSQL setup to the image.
@@ -643,6 +670,11 @@ is a judgment call, and the suite runs in an image without `.git`.
 when the recognizer couldn't answer; `word_coverage` is null when every word is
 OOV. A null means unmeasured. Treat its names and shapes like the client's
 fields once something reads them.
+
+Under `include_phones=1`, `words[].heard` is true or false once recognition
+answered, and null when `recognition` is null or the word gave no token (a
+filler like `um`). Each phone's `word_index` is its word's position in
+`words`, not in the aligner's word list, which counts silences.
 
 `/analyze`'s `speech_span` is `{start, end}`, the padded slice the aligner
 worked on, or null when Silero heard no speech and the whole clip was aligned

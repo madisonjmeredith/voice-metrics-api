@@ -42,7 +42,7 @@ Query parameter `include_phones=1` adds `words` and `phones` to the response. Au
   "pitch":     { "mean": 181.2, "median": 178.9, "stdev": 24.1, "min": 121.0, "max": 240.3, "unit": "Hz" },
   "resonance": { "mean": 0.58, "median": 0.57, "stdev": 0.11, "balanced": 0.61 },
   "formants":  { "f1": { "mean": 512.0, "...": "..." }, "f2": { "...": "..." }, "f3": { "...": "..." }, "unit": "Hz" },
-  "words":  [ { "word": "hello", "start": 0.31, "end": 0.62 } ],
+  "words":  [ { "word": "hello", "start": 0.31, "end": 0.62, "heard": true } ],
   "phones": [ { "phone": "HH", "word_index": 0, "start": 0.31, "end": 0.38, "midpoint": 0.345,
                 "f0": 176.1, "f1": 512.0, "f2": 1622.4, "f3": 2701.9,
                 "z": [-0.3, 0.2, 0.1, 0.0], "resonance": 0.49, "outlier": false } ]
@@ -60,6 +60,8 @@ Query parameter `include_phones=1` adds `words` and `phones` to the response. Au
 - `recognition` is what a speech recognizer heard in the clip and how much of the transcript that covers. `text` is the recognizer's own transcription. `word_coverage` is the share of the transcript's words (from 0 to 1) that show up in that transcription in the same order. Case, punctuation, contractions, and spelled-out numbers don't count as differences. Words in `oovs` are left out because the recognizer has no reason to spell a name the way you did. Extra words cost nothing. A stumble or a repeated phrase doesn't lower it. `compared_words` is how many transcript words it was measured over after normalization, where a contraction counts as two.
 - Use `word_coverage` and `speech_coverage` together. Missing or wrong words lower `word_coverage` and extra speech the transcript doesn't cover lowers `speech_coverage`. In the takes measured so far, the lowest genuine read was 0.667 (a tongue twister the recognizer "corrected") and the next 0.8. A read of a different prompt topped out at 0.5. That was two greetings that share half their words. As with `speech_coverage`, the floor is yours.
 - `word_coverage` is `null` when every transcript word is out of vocabulary. `recognition` itself is `null` when the recognizer couldn't answer in time or is restarting. The rest of the response is still scored. Treat a `null` as unmeasured instead of as a mismatch.
+- `words` lists the aligned words. `heard` says whether the recognizer heard each one. It's `null` when `recognition` is `null` or when the word normalizes to nothing, like `um`. A phone's `word_index` is its word's position in `words`.
+- The scores count every aligned word whether or not it was heard. A take that leaves part of the prompt out is still scored if it aligns, so check `word_coverage` to turn those away. In the measurements so far, partial reads that aligned read 0.31 to 0.72.
 - `z` is the phone's F0–F3 as standard deviations from the population mean
   for that phoneme.
 
