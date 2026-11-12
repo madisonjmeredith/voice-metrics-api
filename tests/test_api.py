@@ -167,7 +167,7 @@ def test_include_phones_adds_detail(client, vowel_a):
         "phone", "word_index", "start", "end", "midpoint",
         "f0", "f1", "f2", "f3", "z", "resonance", "outlier",
     }
-    assert first["word_index"] == 1
+    assert body["words"][first["word_index"]]["word"] == "ah"
     assert len(first["z"]) == 4
 
 

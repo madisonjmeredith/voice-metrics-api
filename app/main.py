@@ -268,10 +268,10 @@ def _round_stats(stats: dict, digits: int = 1) -> dict:
     return {key: _round(value, digits) for key, value in stats.items()}
 
 
-def _phone_payload(phone: MeasuredPhone) -> dict:
+def _phone_payload(phone: MeasuredPhone, word_positions: dict[int, int]) -> dict:
     return {
         "phone": phone.label,
-        "word_index": phone.span.word_index,
+        "word_index": word_positions.get(phone.span.word_index),
         "start": _round(phone.span.start, 3),
         "end": _round(phone.span.end, 3),
         "midpoint": _round(phone.span.midpoint, 3),
@@ -294,6 +294,12 @@ def _word_payload(alignment: Alignment) -> list[dict]:
         {"word": w.label, "start": _round(w.start, 3), "end": _round(w.end, 3)}
         for w in alignment.speech_words
     ]
+
+
+def _word_positions(alignment: Alignment) -> dict[int, int]:
+    """Each speech word's index in alignment.words, mapped to its place in the words payload."""
+    speech = [index for index, word in enumerate(alignment.words) if word.is_speech]
+    return {index: position for position, index in enumerate(speech)}
 
 
 def _save_as_wav(upload: UploadFile, tmp_path: Path) -> tuple[Path, float]:
@@ -402,7 +408,8 @@ async def analyze(
     }
     if include_phones:
         result["words"] = _word_payload(alignment)
-        result["phones"] = [_phone_payload(p) for p in phones]
+        positions = _word_positions(alignment)
+        result["phones"] = [_phone_payload(p, positions) for p in phones]
     return result
 
 
