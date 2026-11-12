@@ -445,6 +445,44 @@ declares English, MFA will try to load `en_core_web_sm` at request time.
 with the reference project's Praat settings (`0 5 5000 0.025 50`), and the
 z-scores only mean something against readings taken the same way.
 
+**An octave-low pitch reading is re-read above a speaker-relative floor
+(#46).** Praat's 75 Hz floor leaves room for the octave below a higher voice,
+and Praat follows that octave for runs of frames. In #46, four phones read 88 to
+92 Hz between neighbors near 180 to 230, and the clip's median came out 156.8
+Hz against 225 to 229 Hz for the same speaker. `flag_outliers` kept them.
+`spike/octave_floor.py` ran over 95 local takes (the 21 reference samples, the
+20 calibration takes, and 54 client takes with enough voicing) on November 11,
+2026. 46 of them had a run of 4 or more frames under 0.6 times their median,
+almost all from higher voices; for a lower voice, the octave below is already
+under 75 Hz. `speaker_floor` puts the floor at 0.6 times the median of the
+first pass's voiced frames, never under 75 Hz, and `AudioAnalyzer` runs a
+second pitch pass with that floor when any first-pass frame reads under it.
+The floor is tied to the median, not to 0.75 times the 25th
+percentile, which is the usual two-pass rule: one take had 28% of its voiced
+frames in low runs, and its 25th percentile landed inside them. Of 922 low
+frames, the second pass put 497 back in range at 0.96 of the median (5th to
+95th percentile 0.70 to 1.16) and found no voicing in 424, which fits creak;
+those phones now carry no pitch on purpose. Only readings where either frame
+behind Praat's linear read is low come from the second pass. A higher floor
+shortens Praat's window, and on those 46 takes a full second pass unvoiced 620
+of 20,821 in-range frames and moved another 510 by more than 3%. 0.6 is about
+9 semitones under the median. A synthetic glide down to 0.625 of its start
+kept its low end; a real dip deeper than that would be re-read. The second
+pass adds about 20 ms natively on a 58.8 s clip (the formants take 210 ms),
+and none runs for a voice whose median is under 125 Hz. The run was replayed
+through `/analyze` on 85 takes: the 41 with transcripts, plus 44 client takes
+using the recognizer's text as their transcript. Every take answered 200 on
+both images. The 43 with no low reading under a phone returned identical
+bodies. The other 42 had 80 low phones: 46 were re-read in range, 19 now read
+no pitch, and 15 were hidden behind outlier flags either way. The pitch median
+moved more than 2 Hz on 5 takes (−2.2 to +9.3 Hz). `flag_outliers` drops the
+whole phone when any reading is an outlier, F0 included. So phones that an
+octave-low F0 had flagged got their resonance back, and 12 more phones flipped
+flags as the clip's mean and SD moved. `resonance.balanced` moved more than
+0.01 on 14 takes, by at most 0.064. Rerun the spike and that replay if
+`SPEAKER_FLOOR_RATIO` or the Praat version changes. No score reads
+`stats.json`'s F0, so this doesn't touch the parity test.
+
 **The aligned phone label is the stats key.** The reference looked up the
 cmudict pronunciation by index within the word, which drifts on pronunciation
 variants. The aligner already chose a pronunciation; use it.
