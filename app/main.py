@@ -42,7 +42,7 @@ from app.recognizer_pool import (
 )
 from app.request_log import RequestLog
 from app.telemetry import configure_logging, note, timed
-from app.transcript_match import normalize, transcript_words, word_coverage
+from app.transcript_match import compare
 from app.worker import AlignerBusy, AlignerPool, AlignerUnavailable, AlignmentTimeout
 
 configure_logging()
@@ -268,10 +268,10 @@ def _round_stats(stats: dict, digits: int = 1) -> dict:
     return {key: _round(value, digits) for key, value in stats.items()}
 
 
-def _phone_payload(phone: MeasuredPhone) -> dict:
+def _phone_payload(phone: MeasuredPhone, word_positions: dict[int, int]) -> dict:
     return {
         "phone": phone.label,
-        "word_index": phone.span.word_index,
+        "word_index": word_positions.get(phone.span.word_index),
         "start": _round(phone.span.start, 3),
         "end": _round(phone.span.end, 3),
         "midpoint": _round(phone.span.midpoint, 3),
@@ -289,11 +289,22 @@ def _span_payload(span: Optional[tuple[float, float]]) -> Optional[dict]:
     return None if span is None else {"start": _round(span[0], 3), "end": _round(span[1], 3)}
 
 
-def _word_payload(alignment: Alignment) -> list[dict]:
+def _word_payload(alignment: Alignment, positions: dict[int, int], heard: dict[int, bool]) -> list[dict]:
     return [
-        {"word": w.label, "start": _round(w.start, 3), "end": _round(w.end, 3)}
-        for w in alignment.speech_words
+        {
+            "word": alignment.words[index].label,
+            "start": _round(alignment.words[index].start, 3),
+            "end": _round(alignment.words[index].end, 3),
+            "heard": heard.get(index),
+        }
+        for index in positions
     ]
+
+
+def _word_positions(alignment: Alignment) -> dict[int, int]:
+    """Each speech word's index in alignment.words, mapped to its place in the words payload."""
+    speech = [index for index, word in enumerate(alignment.words) if word.is_speech]
+    return {index: position for position, index in enumerate(speech)}
 
 
 def _save_as_wav(upload: UploadFile, tmp_path: Path) -> tuple[Path, float]:
@@ -307,17 +318,20 @@ def _save_as_wav(upload: UploadFile, tmp_path: Path) -> tuple[Path, float]:
     return wav_path, get_audio_duration(wav_path)
 
 
-async def _recognition(task: asyncio.Task, alignment: Alignment) -> Optional[dict]:
-    """What the recognizer heard and how much of the transcript that covers; None if it couldn't say."""
+async def _recognition(task: asyncio.Task, alignment: Alignment) -> tuple[Optional[dict], dict[int, bool]]:
+    """What the recognizer heard, how much of the transcript that covers, and which aligned words."""
     try:
         text = await task
     except tuple(RECOGNITION_FAILURES) as exc:
         note(recognition=RECOGNITION_FAILURES[type(exc)])
-        return None
-    words = transcript_words(alignment)
-    figures = {"word_coverage": _round(word_coverage(words, normalize(text)), 3), "compared_words": len(words)}
+        return None, {}
+    comparison = compare(alignment, text)
+    figures = {
+        "word_coverage": _round(comparison.word_coverage, 3),
+        "compared_words": comparison.compared_words,
+    }
     note(recognition="ok", **figures)
-    return {"text": text, **figures}
+    return {"text": text, **figures}, comparison.heard
 
 
 def _probe(passes: Callable[[PoolState], bool], verdicts: tuple[str, str]) -> JSONResponse:
@@ -378,7 +392,7 @@ async def analyze(
                 raise TooLittleVoicingError(
                     "Too little voiced speech to measure pitch. Check the microphone and speak aloud."
                 )
-            recognition = await _recognition(recognizing, alignment)
+            recognition, heard = await _recognition(recognizing, alignment)
         finally:
             recognizing.cancel()
 
@@ -401,8 +415,9 @@ async def analyze(
         },
     }
     if include_phones:
-        result["words"] = _word_payload(alignment)
-        result["phones"] = [_phone_payload(p) for p in phones]
+        positions = _word_positions(alignment)
+        result["words"] = _word_payload(alignment, positions, heard)
+        result["phones"] = [_phone_payload(p, positions) for p in phones]
     return result
 
 

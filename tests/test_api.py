@@ -160,14 +160,14 @@ def test_include_phones_adds_detail(client, vowel_a):
     with client(FakeAligner(vowel_alignment())) as c:
         body = post_analyze(c, vowel_a, include_phones=1).json()
 
-    assert body["words"] == [{"word": "ah", "start": 0.1, "end": 1.4}]
+    assert body["words"] == [{"word": "ah", "start": 0.1, "end": 1.4, "heard": True}]
     assert [p["phone"] for p in body["phones"]] == ["AA1", "AH0", "AA1", "AH0"]
     first = body["phones"][0]
     assert set(first) == {
         "phone", "word_index", "start", "end", "midpoint",
         "f0", "f1", "f2", "f3", "z", "resonance", "outlier",
     }
-    assert first["word_index"] == 1
+    assert body["words"][first["word_index"]]["word"] == "ah"
     assert len(first["z"]) == 4
 
 
@@ -195,6 +195,22 @@ def test_word_coverage_counts_only_the_words_that_were_heard(client, vowel_a):
     with client(aligner, recognizer=FakeRecognizer("Hello there.")) as c:
         body = post_analyze(c, vowel_a).json()
     assert body["recognition"] == {"text": "Hello there.", "word_coverage": 0.0, "compared_words": 1}
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    "recognizer, heard",
+    [
+        (FakeRecognizer("Ah."), True),
+        (FakeRecognizer("Hello there."), False),
+        (FakeRecognizer(error=RecognitionTimeout("timed out")), None),
+    ],
+    ids=["heard", "unheard", "unmeasured"],
+)
+def test_include_phones_marks_whether_each_word_was_heard(client, vowel_a, recognizer, heard):
+    with client(FakeAligner(vowel_alignment()), recognizer=recognizer) as c:
+        body = post_analyze(c, vowel_a, include_phones=1).json()
+    assert [w["heard"] for w in body["words"]] == [heard]
 
 
 @needs_ffmpeg
